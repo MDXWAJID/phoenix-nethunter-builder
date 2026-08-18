@@ -13,11 +13,11 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib \
-            gcc-multilib git gnupg gperf lib32readline-dev lib32z1-dev libelf-dev \
-            liblz4-tool libncurses5-dev libssl-dev libxml2 libxml2-utils lzop pngcrush \
-            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi libssl-dev
+          # Removed conflicting gcc-multilib / gcc cross packages
+          sudo apt-get install -y bc bison build-essential ccache curl flex git \
+            gnupg gperf libelf-dev liblz4-tool libncurses5-dev libssl-dev libxml2 \
+            libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc \
+            zip zlib1g-dev python2 python3
 
       - name: Clone Kernel Source & AnyKernel3
         run: |
@@ -31,6 +31,7 @@ jobs:
       - name: Configure and Compile Kernel
         run: |
           cd kernel
+          # Proton Clang contains its own cross-compilers inside bin/
           export PATH=$(pwd)/../clang/bin:$PATH
           export ARCH=arm64
           export SUBARCH=arm64
@@ -49,10 +50,10 @@ jobs:
 
           echo "Target defconfig: $DEFCONFIG"
 
-          # 1. Generate base configuration
+          # 1. Generate base defconfig
           make O=out ARCH=arm64 $DEFCONFIG
 
-          # 2. Inject NetHunter & ath9k drivers directly as built-in (=y)
+          # 2. Inject NetHunter & ath9k features
           ./scripts/config --file out/.config \
             -e CONFIG_IKCONFIG \
             -e CONFIG_IKCONFIG_PROC \
@@ -75,13 +76,12 @@ jobs:
             -e CONFIG_USB_CONFIGFS \
             -e CONFIG_USB_CONFIGFS_F_HID \
             -e CONFIG_USB_CONFIGFS_F_RNDIS \
-            -e CONFIG_USB_CONFIGFS_F_MASS_STORAGE \
-            -d CONFIG_DEBUG_SECTION_MISMATCH
+            -e CONFIG_USB_CONFIGFS_F_MASS_STORAGE
 
-          # 3. Synchronize config options
+          # 3. Synchronize configuration
           make O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- olddefconfig
 
-          # 4. Build Kernel Image and DTBs
+          # 4. Build Kernel Image & DTBs
           make -j$(nproc --all) O=out \
             ARCH=arm64 \
             CC=clang \
@@ -95,7 +95,6 @@ jobs:
 
       - name: Package with AnyKernel3
         run: |
-          # Detect output image location
           IMAGE_PATH=""
           if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
             IMAGE_PATH="kernel/out/arch/arm64/boot/Image.gz-dtb"
@@ -115,12 +114,10 @@ jobs:
           echo "Using kernel image: $IMAGE_PATH"
           cp "$IMAGE_PATH" AnyKernel3/Image.gz-dtb || cp "$IMAGE_PATH" AnyKernel3/
 
-          # Copy dtbo image if built
           if [ -f kernel/out/arch/arm64/boot/dtbo.img ]; then
             cp kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
           fi
 
-          # Setup AnyKernel3 packaging script for Poco X2 (phoenix)
           cd AnyKernel3
           sed -i 's/is_slot_device=auto;/is_slot_device=0;/g' anykernel.sh
           sed -i 's/block=auto;/block=\/dev\/block\/bootdevice\/by-name\/boot;/g' anykernel.sh
@@ -133,3 +130,4 @@ jobs:
         with:
           name: NetHunter-Kernel-Phoenix-PE12
           path: NetHunter-Kernel-Phoenix-PE12.zip
+    
