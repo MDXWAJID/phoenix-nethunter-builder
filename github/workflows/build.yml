@@ -1,0 +1,115 @@
+name: Build Poco X2 NetHunter Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses5-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev clang lld llvm libssl-dev
+
+      - name: Clone Kernel Source & AnyKernel3
+        run: |
+          # Clone PixelExperience Phoenix Kernel Source (Android 12/twelve branch)
+          git clone https://github.com/PixelExperience-Devices/kernel_xiaomi_phoenix.git -b twelve kernel --depth=1
+          
+          # Clone AnyKernel3 template
+          git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+
+      - name: Fetch Proton Clang Toolchain
+        run: |
+          git clone https://github.com/kdrag0n/proton-clang.git --depth=1 clang
+
+      - name: Inject NetHunter & ath9k_htc Defconfig Flags
+        run: |
+          # Identify defconfig path for phoenix (SM7150 / SDM730G)
+          if [ -f "kernel/arch/arm64/configs/vendor/phoenix_defconfig" ]; then
+            DEFCONFIG="kernel/arch/arm64/configs/vendor/phoenix_defconfig"
+          else
+            DEFCONFIG="kernel/arch/arm64/configs/phoenix_defconfig"
+          fi
+          
+          echo "" >> $DEFCONFIG
+          echo "# NetHunter Core Features" >> $DEFCONFIG
+          echo "CONFIG_IKCONFIG=y" >> $DEFCONFIG
+          echo "CONFIG_IKCONFIG_PROC=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBES=y" >> $DEFCONFIG
+          echo "CONFIG_BPF_SYSCALL=y" >> $DEFCONFIG
+          
+          echo "# Wi-Fi Monitor & Packet Injection Stack" >> $DEFCONFIG
+          echo "CONFIG_CFG80211=m" >> $DEFCONFIG
+          echo "CONFIG_MAC80211=m" >> $DEFCONFIG
+          echo "CONFIG_CFG80211_WEXT=y" >> $DEFCONFIG
+          echo "CONFIG_MAC80211_HAS_RC=y" >> $DEFCONFIG
+          echo "CONFIG_MAC80211_RC_MINSTREL=y" >> $DEFCONFIG
+          echo "CONFIG_MAC80211_RC_MINSTREL_HT=y" >> $DEFCONFIG
+          
+          echo "# ath9k_htc Driver" >> $DEFCONFIG
+          echo "CONFIG_ATH_COMMON=m" >> $DEFCONFIG
+          echo "CONFIG_ATH9K_HW=m" >> $DEFCONFIG
+          echo "CONFIG_ATH9K_COMMON=m" >> $DEFCONFIG
+          echo "CONFIG_ATH9K_HTC=m" >> $DEFCONFIG
+          
+          echo "# BadUSB / HID Gadget Features" >> $DEFCONFIG
+          echo "CONFIG_USB_GADGET=y" >> $DEFCONFIG
+          echo "CONFIG_USB_CONFIGFS=y" >> $DEFCONFIG
+          echo "CONFIG_USB_CONFIGFS_F_HID=y" >> $DEFCONFIG
+          echo "CONFIG_USB_CONFIGFS_F_RNDIS=y" >> $DEFCONFIG
+          echo "CONFIG_USB_CONFIGFS_F_MASS_STORAGE=y" >> $DEFCONFIG
+
+      - name: Compile Kernel
+        run: |
+          cd kernel
+          export PATH=$(pwd)/../clang/bin:$PATH
+          
+          # Check defconfig target name
+          if [ -f "arch/arm64/configs/vendor/phoenix_defconfig" ]; then
+            CONFIG_NAME="vendor/phoenix_defconfig"
+          else
+            CONFIG_NAME="phoenix_defconfig"
+          fi
+
+          make O=out ARCH=arm64 $CONFIG_NAME
+          make -j$(nproc --all) O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 \
+            LLVM_IAS=1
+
+      - name: Package with AnyKernel3
+        run: |
+          # Copy compiled kernel Image
+          if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/Image.gz-dtb
+          elif [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/Image.gz
+          fi
+
+          # Copy dtbo.img if present
+          if [ -f kernel/out/arch/arm64/boot/dtbo.img ]; then
+            cp kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
+          fi
+
+          cd AnyKernel3
+          # Configure AnyKernel3 for Poco X2 (phoenix is non-A/B)
+          sed -i 's/is_slot_device=auto;/is_slot_device=0;/g' anykernel.sh
+          sed -i 's/block=auto;/block=\/dev\/block\/bootdevice\/by-name\/boot;/g' anykernel.sh
+
+          # Remove git directory before packaging
+          rm -rf .git
+          zip -r9 ../NetHunter-Kernel-Phoenix-PE12.zip *
+
+      - name: Upload Flashable Zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetHunter-Kernel-Phoenix-PE12
+          path: NetHunter-Kernel-Phoenix-PE12.zip
