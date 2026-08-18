@@ -6,8 +6,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -15,165 +13,123 @@ jobs:
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bc bison build-essential ccache curl flex git gnupg gperf \
-            libelf-dev libncurses5-dev libssl-dev libxml2 libxml2-utils \
-            lzop pngcrush rsync schedtool squashfs-tools xsltproc zip \
-            zlib1g-dev python3 python-is-python3 wget cpio unzip device-tree-compiler \
-            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu \
-            binutils-arm-linux-gnueabi lib32z1-dev lib32readline-dev
+          sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib \
+            gcc-multilib git gnupg gperf lib32readline-dev lib32z1-dev libelf-dev \
+            liblz4-tool libncurses5-dev libssl-dev libxml2 libxml2-utils lzop pngcrush \
+            rsync schedtool squashfs-tools xsltproc zip zlib1g-dev gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi libssl-dev
 
       - name: Clone Kernel Source & AnyKernel3
         run: |
-          set -e
-          # PE phoenix twelve tree (change branch/URL if your device tree differs)
-          git clone --depth=1 -b twelve \
-            https://github.com/PixelExperience-Devices/kernel_xiaomi_phoenix.git kernel
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
-
-          echo "Kernel top files:"
-          ls -la kernel
-          echo "Available defconfigs:"
-          ls kernel/arch/arm64/configs kernel/arch/arm64/configs/vendor 2>/dev/null || true
+          git clone https://github.com/PixelExperience-Devices/kernel_xiaomi_phoenix.git -b twelve kernel --depth=1
+          git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
 
       - name: Fetch Proton Clang Toolchain
         run: |
-          set -e
-          git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
-          # Sanity-check toolchain
-          ./clang/bin/clang --version
-          ./clang/bin/ld.lld --version
+          git clone https://github.com/kdrag0n/proton-clang.git --depth=1 clang
 
-      - name: Compile Kernel
+      - name: Configure and Compile Kernel
         run: |
-          set -euo pipefail
           cd kernel
-
+          export PATH=$(pwd)/../clang/bin:$PATH
           export ARCH=arm64
           export SUBARCH=arm64
-          export PATH="${GITHUB_WORKSPACE}/clang/bin:${PATH}"
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
-          export READELF=llvm-readelf
-          # Phoenix 4.14 PE trees are unstable with IAS + full LLVM; start OFF
-          export LLVM=0
-          export LLVM_IAS=0
-          export KBUILD_BUILD_HOST=nethunter
-          export KBUILD_BUILD_USER=phoenix
-          export KCFLAGS="-Wno-error -Wno-unused-function -Wno-unused-variable"
-          export KCPPFLAGS="-Wno-error"
+          export HEADER_ARCH=arm64
 
-          mkdir -p out
-          rm -rf out/*
-
-          echo "=== toolchain ==="
-          which clang; clang --version | head -3
-          which aarch64-linux-gnu-gcc; aarch64-linux-gnu-gcc --version | head -1
-          which ld.lld; ld.lld --version | head -1
-
-          # --- defconfig ---
-          if [ -f arch/arm64/configs/vendor/phoenix_defconfig ]; then
-            DEFCONFIG=vendor/phoenix_defconfig
-          elif [ -f arch/arm64/configs/phoenix_defconfig ]; then
-            DEFCONFIG=phoenix_defconfig
-          elif [ -f arch/arm64/configs/vendor/phoenix-perf_defconfig ]; then
-            DEFCONFIG=vendor/phoenix-perf_defconfig
+          # Locate defconfig
+          if [ -f "arch/arm64/configs/vendor/phoenix_defconfig" ]; then
+            DEFCONFIG="vendor/phoenix_defconfig"
+          elif [ -f "arch/arm64/configs/phoenix_defconfig" ]; then
+            DEFCONFIG="phoenix_defconfig"
+          elif [ -f "arch/arm64/configs/vendor/phoenix-perf_defconfig" ]; then
+            DEFCONFIG="vendor/phoenix-perf_defconfig"
           else
-            echo "NO DEFCONFIG"; find arch/arm64/configs -type f | sort
-            exit 1
+            DEFCONFIG=$(find arch/arm64/configs/ -name "*phoenix*" | head -n 1 | sed 's|arch/arm64/configs/||')
           fi
-          echo "DEFCONFIG=$DEFCONFIG"
-          make O=out "$DEFCONFIG"
 
-          cfg() { ./scripts/config --file out/.config "$@" 2>/dev/null || echo "skip: $*"; }
+          echo "Target defconfig: $DEFCONFIG"
 
-          # NetHunter minimum set (avoid exotic drivers that break 4.14)
-          cfg -e CONFIG_IKCONFIG
-          cfg -e CONFIG_IKCONFIG_PROC
-          cfg -e CONFIG_KPROBES
-          cfg -e CONFIG_BPF
-          cfg -e CONFIG_BPF_SYSCALL
-          cfg -e CONFIG_CFG80211
-          cfg -e CONFIG_CFG80211_WEXT
-          cfg -e CONFIG_MAC80211
-          cfg -e CONFIG_MAC80211_HAS_RC
-          cfg -e CONFIG_MAC80211_RC_MINSTREL
-          cfg -e CONFIG_USB_GADGET
-          cfg -e CONFIG_USB_CONFIGFS
-          cfg -e CONFIG_USB_CONFIGFS_F_HID
-          cfg -e CONFIG_USB_CONFIGFS_F_RNDIS
-          cfg -e CONFIG_USB_CONFIGFS_F_MASS_STORAGE
-          cfg -m CONFIG_ATH9K_HTC
-          # kill LTO / CFI / dead code that breaks proton on 4.14
-          cfg -d CONFIG_LTO
-          cfg -d CONFIG_LTO_CLANG
-          cfg -d CONFIG_LTO_CLANG_THIN
-          cfg -d CONFIG_LTO_CLANG_FULL
-          cfg -e CONFIG_LTO_NONE
-          cfg -d CONFIG_CFI
-          cfg -d CONFIG_CFI_CLANG
-          cfg -d CONFIG_SHADOW_CALL_STACK
-          cfg -d CONFIG_TOOLS_SUPPORT_RELR
-          cfg -d CONFIG_RELR
+          # 1. Generate base configuration
+          make O=out ARCH=arm64 $DEFCONFIG
 
-          make O=out olddefconfig
+          # 2. Inject NetHunter & ath9k drivers directly as built-in (=y)
+          ./scripts/config --file out/.config \
+            -e CONFIG_IKCONFIG \
+            -e CONFIG_IKCONFIG_PROC \
+            -e CONFIG_KPROBES \
+            -e CONFIG_BPF_SYSCALL \
+            -e CONFIG_CFG80211 \
+            -e CONFIG_CFG80211_WEXT \
+            -e CONFIG_MAC80211 \
+            -e CONFIG_MAC80211_HAS_RC \
+            -e CONFIG_MAC80211_RC_MINSTREL \
+            -e CONFIG_MAC80211_RC_MINSTREL_HT \
+            -e CONFIG_MAC80211_LEDS \
+            -e CONFIG_LEDS_TRIGGERS \
+            -e CONFIG_ATH_COMMON \
+            -e CONFIG_ATH9K_HW \
+            -e CONFIG_ATH9K_COMMON \
+            -e CONFIG_ATH9K_HTC \
+            -e CONFIG_ATH9K_HTC_DEBUGFS \
+            -e CONFIG_USB_GADGET \
+            -e CONFIG_USB_CONFIGFS \
+            -e CONFIG_USB_CONFIGFS_F_HID \
+            -e CONFIG_USB_CONFIGFS_F_RNDIS \
+            -e CONFIG_USB_CONFIGFS_F_MASS_STORAGE \
+            -d CONFIG_DEBUG_SECTION_MISMATCH
 
-          echo "=== critical config ==="
-          grep -E 'CONFIG_(LTO|CFI|IKCONFIG|BPF_SYSCALL|USB_CONFIGFS|MAC80211|ATH9K)=' out/.config || true
+          # 3. Synchronize config options
+          make O=out ARCH=arm64 CC=clang CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- olddefconfig
 
-          # --- build: GNU as + clang CC (most reliable on PE phoenix) ---
-          set +e
-          make -j"$(nproc)" O=out \
+          # 4. Build Kernel Image and DTBs
+          make -j$(nproc --all) O=out \
             ARCH=arm64 \
             CC=clang \
-            HOSTCC=gcc \
-            HOSTCXX=g++ \
-            LD=ld.lld \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             AR=llvm-ar \
             NM=llvm-nm \
             OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            LLVM_IAS=0 \
-            2>&1 | tee /tmp/kernel-build.log
-          status=${PIPESTATUS[0]}
-          set -e
+            STRIP=llvm-strip
 
-          echo "=== LAST 300 LINES ==="
-          tail -n 300 /tmp/kernel-build.log
-
-          echo "=== FIRST HARD FAILURE LINES ==="
-          # broader patterns — do not rely on 'error:' alone
-          grep -nE -i \
-            'error:|fatal |undefined reference|No rule to make target|cannot find |FAILED|unsupported |No such file|Assembler messages|segment fault|killed|recipe for target' \
-            /tmp/kernel-build.log | head -n 100 || true
-
-          echo "=== recipes that failed ==="
-          grep -n 'recipe for target' /tmp/kernel-build.log | tail -n 40 || true
-
-          if [ "$status" -ne 0 ]; then
-            # save log as artifact aid
-            cp /tmp/kernel-build.log "${GITHUB_WORKSPACE}/kernel-build-fail.log" || true
-            exit "$status"
+      - name: Package with AnyKernel3
+        run: |
+          # Detect output image location
+          IMAGE_PATH=""
+          if [ -f kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
+            IMAGE_PATH="kernel/out/arch/arm64/boot/Image.gz-dtb"
+          elif [ -f kernel/out/arch/arm64/boot/Image-dtb ]; then
+            IMAGE_PATH="kernel/out/arch/arm64/boot/Image-dtb"
+          elif [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            IMAGE_PATH="kernel/out/arch/arm64/boot/Image.gz"
+          elif [ -f kernel/out/arch/arm64/boot/Image ]; then
+            IMAGE_PATH="kernel/out/arch/arm64/boot/Image"
           fi
 
-          ls -la out/arch/arm64/boot/
-      - name: Upload build log on failure
-        if: failure()
+          if [ -z "$IMAGE_PATH" ]; then
+            echo "Error: No kernel image file found in out directory!"
+            exit 1
+          fi
+
+          echo "Using kernel image: $IMAGE_PATH"
+          cp "$IMAGE_PATH" AnyKernel3/Image.gz-dtb || cp "$IMAGE_PATH" AnyKernel3/
+
+          # Copy dtbo image if built
+          if [ -f kernel/out/arch/arm64/boot/dtbo.img ]; then
+            cp kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
+          fi
+
+          # Setup AnyKernel3 packaging script for Poco X2 (phoenix)
+          cd AnyKernel3
+          sed -i 's/is_slot_device=auto;/is_slot_device=0;/g' anykernel.sh
+          sed -i 's/block=auto;/block=\/dev\/block\/bootdevice\/by-name\/boot;/g' anykernel.sh
+          
+          rm -rf .git
+          zip -r9 ../NetHunter-Kernel-Phoenix-PE12.zip *
+
+      - name: Upload Flashable Zip
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-build-fail-log
-          path: kernel-build-fail.log
-          if-no-files-found: ignore
-
+          name: NetHunter-Kernel-Phoenix-PE12
+          path: NetHunter-Kernel-Phoenix-PE12.zip
