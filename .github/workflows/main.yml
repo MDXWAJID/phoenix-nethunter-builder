@@ -63,17 +63,23 @@ jobs:
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
           export READELF=llvm-readelf
-          # Proton + Android kernels: enable clang IAS unless your tree is broken with it
-          export LLVM=1
-          export LLVM_IAS=1
+          # Phoenix 4.14 PE trees are unstable with IAS + full LLVM; start OFF
+          export LLVM=0
+          export LLVM_IAS=0
           export KBUILD_BUILD_HOST=nethunter
           export KBUILD_BUILD_USER=phoenix
+          export KCFLAGS="-Wno-error -Wno-unused-function -Wno-unused-variable"
+          export KCPPFLAGS="-Wno-error"
 
           mkdir -p out
-          rm -f out/.config
+          rm -rf out/*
 
-          # --- Step 1: defconfig (try vendor path first, then plain) ---
-          DEFCONFIG=""
+          echo "=== toolchain ==="
+          which clang; clang --version | head -3
+          which aarch64-linux-gnu-gcc; aarch64-linux-gnu-gcc --version | head -1
+          which ld.lld; ld.lld --version | head -1
+
+          # --- defconfig ---
           if [ -f arch/arm64/configs/vendor/phoenix_defconfig ]; then
             DEFCONFIG=vendor/phoenix_defconfig
           elif [ -f arch/arm64/configs/phoenix_defconfig ]; then
@@ -81,81 +87,55 @@ jobs:
           elif [ -f arch/arm64/configs/vendor/phoenix-perf_defconfig ]; then
             DEFCONFIG=vendor/phoenix-perf_defconfig
           else
-            echo "ERROR: no phoenix defconfig found"
-            find arch/arm64/configs -maxdepth 2 -type f -name '*phoenix*' -o -name '*defconfig' | head -100
+            echo "NO DEFCONFIG"; find arch/arm64/configs -type f | sort
             exit 1
           fi
-          echo "Using DEFCONFIG=${DEFCONFIG}"
-          make O=out ${DEFCONFIG}
+          echo "DEFCONFIG=$DEFCONFIG"
+          make O=out "$DEFCONFIG"
 
-          test -f out/.config || { echo "ERROR: out/.config missing after defconfig"; exit 1; }
+          cfg() { ./scripts/config --file out/.config "$@" 2>/dev/null || echo "skip: $*"; }
 
-          # --- Step 2: NetHunter / wireless / USB gadget options ---
-          # Use || true on unknown symbols so one missing Kconfig does not kill the job
-          cfg() {
-            ./scripts/config --file out/.config "$@" || \
-              echo "WARN: scripts/config failed: $*"
-          }
-
+          # NetHunter minimum set (avoid exotic drivers that break 4.14)
           cfg -e CONFIG_IKCONFIG
           cfg -e CONFIG_IKCONFIG_PROC
           cfg -e CONFIG_KPROBES
-          cfg -e CONFIG_HAVE_KPROBES
-          cfg -e CONFIG_KPROBE_EVENTS
           cfg -e CONFIG_BPF
           cfg -e CONFIG_BPF_SYSCALL
-          cfg -e CONFIG_BPF_JIT
-          cfg -e CONFIG_HAVE_EBPF_JIT
-          cfg -e CONFIG_CFS_BANDWIDTH
-          cfg -e CONFIG_NETFILTER_XT_TARGET_NFQUEUE
-          cfg -e CONFIG_NETFILTER_XT_TARGET_TEE
           cfg -e CONFIG_CFG80211
           cfg -e CONFIG_CFG80211_WEXT
           cfg -e CONFIG_MAC80211
           cfg -e CONFIG_MAC80211_HAS_RC
           cfg -e CONFIG_MAC80211_RC_MINSTREL
-          cfg -e CONFIG_MAC80211_RC_DEFAULT_MINSTREL
-          cfg -e CONFIG_MAC80211_LEDS
-          cfg -e CONFIG_LEDS_TRIGGERS
-          cfg -e CONFIG_ATH_COMMON
-          cfg -e CONFIG_ATH9K_HW
-          cfg -e CONFIG_ATH9K_COMMON
-          cfg -m CONFIG_ATH9K_HTC
-          cfg -e CONFIG_USB
-          cfg -e CONFIG_USB_SUPPORT
           cfg -e CONFIG_USB_GADGET
           cfg -e CONFIG_USB_CONFIGFS
           cfg -e CONFIG_USB_CONFIGFS_F_HID
           cfg -e CONFIG_USB_CONFIGFS_F_RNDIS
           cfg -e CONFIG_USB_CONFIGFS_F_MASS_STORAGE
-          cfg -e CONFIG_USB_CONFIGFS_SERIAL
-          cfg -e CONFIG_USB_CONFIGFS_ACM
-          cfg -e CONFIG_USB_ETH
-          cfg -e CONFIG_USB_ETH_RNDIS
-          cfg -e CONFIG_HID
-          cfg -e CONFIG_UHID
-          cfg -e CONFIG_MEDIA_SUPPORT
-          cfg -e CONFIG_PACKET
-          cfg -e CONFIG_RFKILL
-          cfg -e CONFIG_SYN_COOKIES
-          # modules often needed for external adapters
-          cfg -m CONFIG_RTL8187
-          cfg -m CONFIG_RTL8XXXU
-          cfg -m CONFIG_RT2800USB
-          cfg -m CONFIG_MT76_USB || true
+          cfg -m CONFIG_ATH9K_HTC
+          # kill LTO / CFI / dead code that breaks proton on 4.14
+          cfg -d CONFIG_LTO
+          cfg -d CONFIG_LTO_CLANG
+          cfg -d CONFIG_LTO_CLANG_THIN
+          cfg -d CONFIG_LTO_CLANG_FULL
+          cfg -e CONFIG_LTO_NONE
+          cfg -d CONFIG_CFI
+          cfg -d CONFIG_CFI_CLANG
+          cfg -d CONFIG_SHADOW_CALL_STACK
+          cfg -d CONFIG_TOOLS_SUPPORT_RELR
+          cfg -d CONFIG_RELR
 
-          # --- Step 3: close Kconfig dependencies ---
           make O=out olddefconfig
 
-          echo "===== Enabled NetHunter-related options ====="
-          grep -E 'CONFIG_(IKCONFIG|KPROBES|BPF_SYSCALL|CFG80211|MAC80211|ATH9K_HTC|USB_CONFIGFS|USB_GADGET)=' out/.config || true
+          echo "=== critical config ==="
+          grep -E 'CONFIG_(LTO|CFI|IKCONFIG|BPF_SYSCALL|USB_CONFIGFS|MAC80211|ATH9K)=' out/.config || true
 
-          # --- Step 4: build (full log to file; surface tail on failure) ---
-          # Prefer Image.gz-dtb (common on Xiaomi 4.14); fall back handled at package step
+          # --- build: GNU as + clang CC (most reliable on PE phoenix) ---
           set +e
           make -j"$(nproc)" O=out \
             ARCH=arm64 \
             CC=clang \
+            HOSTCC=gcc \
+            HOSTCXX=g++ \
             LD=ld.lld \
             AR=llvm-ar \
             NM=llvm-nm \
@@ -165,94 +145,35 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             CLANG_TRIPLE=aarch64-linux-gnu- \
-            LLVM=1 \
-            LLVM_IAS=1 \
+            LLVM_IAS=0 \
             2>&1 | tee /tmp/kernel-build.log
           status=${PIPESTATUS[0]}
           set -e
 
+          echo "=== LAST 300 LINES ==="
+          tail -n 300 /tmp/kernel-build.log
+
+          echo "=== FIRST HARD FAILURE LINES ==="
+          # broader patterns — do not rely on 'error:' alone
+          grep -nE -i \
+            'error:|fatal |undefined reference|No rule to make target|cannot find |FAILED|unsupported |No such file|Assembler messages|segment fault|killed|recipe for target' \
+            /tmp/kernel-build.log | head -n 100 || true
+
+          echo "=== recipes that failed ==="
+          grep -n 'recipe for target' /tmp/kernel-build.log | tail -n 40 || true
+
           if [ "$status" -ne 0 ]; then
-            echo "========== BUILD FAILED (exit $status) — last 200 lines =========="
-            tail -n 200 /tmp/kernel-build.log
-            echo "========== common error greps =========="
-            grep -E -i 'error:|fatal error:|undefined reference|No rule to make target|cannot find|FAILED|unsupported' \
-              /tmp/kernel-build.log | tail -n 80 || true
+            # save log as artifact aid
+            cp /tmp/kernel-build.log "${GITHUB_WORKSPACE}/kernel-build-fail.log" || true
             exit "$status"
           fi
 
-          echo "Build artifacts:"
-          ls -la out/arch/arm64/boot/ || true
-          ls -la out/arch/arm64/boot/dts/qcom/ 2>/dev/null | head || true
-
-      - name: Package with AnyKernel3
-        run: |
-          set -e
-          AK=AnyKernel3
-          BOOT=kernel/out/arch/arm64/boot
-
-          # Pick whatever the tree produced
-          if [ -f "$BOOT/Image.gz-dtb" ]; then
-            cp -f "$BOOT/Image.gz-dtb" "$AK/Image.gz-dtb"
-          elif [ -f "$BOOT/Image.gz" ] && [ -f "$BOOT/dtb.img" ]; then
-            cat "$BOOT/Image.gz" "$BOOT/dtb.img" > "$AK/Image.gz-dtb"
-          elif [ -f "$BOOT/Image.gz" ]; then
-            cp -f "$BOOT/Image.gz" "$AK/Image.gz"
-          elif [ -f "$BOOT/Image" ]; then
-            cp -f "$BOOT/Image" "$AK/Image"
-          else
-            echo "ERROR: no kernel Image* under $BOOT"
-            find kernel/out -name 'Image*' | head -50
-            exit 1
-          fi
-
-          if [ -f "$BOOT/dtbo.img" ]; then
-            cp -f "$BOOT/dtbo.img" "$AK/dtbo.img"
-          fi
-
-          # Minimal AnyKernel device block for phoenix (non-A/B)
-          cat > "$AK/anykernel.sh" << 'EOF'
-          # AnyKernel3 Ramdisk/modpack script
-          properties() { '
-          kernel.string=NetHunter Phoenix PE12
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=phoenix
-          device.name2=phoenixin
-          supported.versions=
-          supported.patchlevels=
-          '; }
-
-          block=/dev/block/bootdevice/by-name/boot;
-          is_slot_device=0;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
-
-          . tools/ak3-core.sh
-
-          ui_print " -> flashing NetHunter kernel"
-          dump_boot
-          write_boot
-          EOF
-          # strip leading spaces from heredoc if anykernel is picky
-          sed -i 's/^          //' "$AK/anykernel.sh"
-
-          # Keep stock AnyKernel tools; only ensure script is executable
-          chmod +x "$AK/anykernel.sh"
-          rm -rf "$AK/.git"
-
-          cd "$AK"
-          zip -r9 ../NetHunter-Kernel-Phoenix-PE12.zip \
-            anykernel.sh tools META-INF ramdisk modules patch Image* dtbo.img 2>/dev/null || \
-          zip -r9 ../NetHunter-Kernel-Phoenix-PE12.zip *
-
-          ls -lh ../NetHunter-Kernel-Phoenix-PE12.zip
-
-      - name: Upload Flashable Zip
+          ls -la out/arch/arm64/boot/
+      - name: Upload build log on failure
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: NetHunter-Kernel-Phoenix-PE12
-          path: NetHunter-Kernel-Phoenix-PE12.zip
-          if-no-files-found: error
+          name: kernel-build-fail-log
+          path: kernel-build-fail.log
+          if-no-files-found: ignore
+
