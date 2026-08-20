@@ -184,6 +184,21 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             olddefconfig
 
+          # FIX: olddefconfig re-validates the whole config and can silently
+          # reset options set above if it thinks a dependency isn't satisfied
+          # yet - no error, it just disappears. That's what ate ATH9K_HTC
+          # last time and produced a zip with zero WiFi modules. Reassert it
+          # here, AFTER olddefconfig, so it's the last word on the config.
+          ./scripts/config --file out/.config --module CONFIG_ATH9K_HTC
+          ./scripts/config --file out/.config -e CONFIG_ATH9K_COMMON -e CONFIG_ATH9K_HW -e CONFIG_ATH_COMMON
+
+          echo "=== Final ATH9K_HTC config state (must show =m) ==="
+          grep -E "CONFIG_ATH9K_HTC=|CONFIG_ATH9K_COMMON=|CONFIG_ATH9K_HW=|CONFIG_ATH_COMMON=" out/.config
+          if ! grep -q "^CONFIG_ATH9K_HTC=m" out/.config; then
+            echo "ERROR: CONFIG_ATH9K_HTC did not stick as a module. Aborting before a silent-fail build."
+            exit 1
+          fi
+
       - name: Compile Kernel
         run: |
           set -e
@@ -244,6 +259,16 @@ jobs:
           find out ../mods_install -name 'ath9k_htc.ko' -exec cp -v {} ../mods/ \; 2>/dev/null || true
           find out ../mods_install -name 'ath*.ko' -exec cp -v {} ../mods/ \; 2>/dev/null || true
 
+          echo "=== Modules actually collected ==="
+          ls -la ../mods/*.ko 2>/dev/null || echo "(none)"
+
+          if [ -z "$(ls -A ../mods/*.ko 2>/dev/null)" ]; then
+            echo "ERROR: No .ko modules were collected - the zip would ship with no WiFi driver."
+            echo "Dumping every .ko produced anywhere in the build tree for diagnosis:"
+            find out ../mods_install -name '*.ko' 2>/dev/null | head -50
+            exit 1
+          fi
+
           ls -la ../mods || true
 
       - name: Package with AnyKernel3
@@ -257,8 +282,31 @@ jobs:
           cp mods/*.ko AnyKernel3/modules/system/lib/modules/ 2>/dev/null || true
 
           cd AnyKernel3
-          sed -i 's/is_slot_device=auto;/is_slot_device=0;/g' anykernel.sh
-          sed -i 's|block=auto;|block=/dev/block/bootdevice/by-name/boot;|g' anykernel.sh
+          # FIX: sed patterns below never matched the real file (wrong case/text),
+          # so the previous zip shipped with Galaxy Nexus template values.
+          # do.devicecheck=1 + device.name1=maguro etc. means the installer
+          # refuses to flash on phoenix. Disable the check entirely.
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
+
+          # BLOCK= still pointed at the OMAP (Galaxy Nexus) template path.
+          # Replace with phoenix's actual boot partition path.
+          sed -i 's|^BLOCK=.*;|BLOCK=/dev/block/bootdevice/by-name/boot;|' anykernel.sh
+
+          # phoenix is not an A/B slot device, so IS_SLOT_DEVICE=0 (already
+          # the template default) is correct as-is - no change needed there.
+
+          # Verify both patches actually landed before zipping
+          if ! grep -q '^do.devicecheck=0' anykernel.sh; then
+            echo "ERROR: devicecheck patch failed to apply"
+            exit 1
+          fi
+          if ! grep -q '^BLOCK=/dev/block/bootdevice/by-name/boot;' anykernel.sh; then
+            echo "ERROR: BLOCK path patch failed to apply"
+            exit 1
+          fi
+          echo "anykernel.sh patched correctly:"
+          grep -E "do.devicecheck|^BLOCK=|IS_SLOT_DEVICE" anykernel.sh
+
           rm -rf .git
           zip -r9 ../NetHunter-Kernel-Phoenix-PE12.zip *
 
