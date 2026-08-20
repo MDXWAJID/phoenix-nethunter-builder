@@ -20,6 +20,7 @@ jobs:
 
       - name: Fix python2 for legacy kernel build
         run: |
+          # The kernel build calls "python2" explicitly for dtbo generation
           sudo ln -sf /usr/bin/python3 /usr/bin/python2
 
       - name: Clone Kernel Source and AnyKernel3
@@ -31,21 +32,22 @@ jobs:
         run: |
           git clone https://github.com/kdrag0n/proton-clang.git --depth=1 clang
 
-      - name: Patch Python 3 compatibility for dtbo generation
+      - name: Patch Python 3 compatibility for DTC scripts
         run: |
           set -e
-          MKDTBO="kernel/scripts/dtc/libfdt/mkdtboimg.py"
-          if [ ! -f "$MKDTBO" ]; then
-            echo "ERROR: mkdtboimg.py not found at $MKDTBO"
-            exit 1
-          fi
-          sed -i 's/xrange/range/g' "$MKDTBO"
-          sed -i 's/if version is 0:/if version == 0:/g' "$MKDTBO"
-          if grep -q 'xrange' "$MKDTBO"; then
+          # The PE twelve tree still carries Python 2 syntax in its DTC helper scripts.
+          # Ubuntu 22.04 runs Python 3, so we patch all known Py2-isms before compilation.
+          find kernel/scripts -name "*.py" -print0 | while IFS= read -r -d '' f; do
+            sed -i 's/xrange/range/g' "$f"
+            sed -i 's/if version is 0:/if version == 0:/g' "$f"
+            sed -i 's/if version is not 0:/if version != 0:/g' "$f"
+          done
+          # Verify the known fatal file is clean
+          if grep -q 'xrange' kernel/scripts/dtc/libfdt/mkdtboimg.py; then
             echo "ERROR: Failed to patch xrange in mkdtboimg.py"
             exit 1
           fi
-          echo "Patched $MKDTBO for Python 3"
+          echo "Python DTC scripts patched for Python 3"
 
       - name: Apply ath9k HTC symbol rename fix
         run: |
@@ -53,7 +55,7 @@ jobs:
           cd kernel
           HTC_H="drivers/net/wireless/ath/ath9k/htc.h"
           if [ ! -f "$HTC_H" ]; then
-            echo "htc.h not found"
+            echo "ERROR: htc.h not found"
             exit 1
           fi
           if grep -q "ath9k_htc_stop" "$HTC_H"; then
@@ -80,30 +82,19 @@ jobs:
           fi
           head -n 40 "$HTC_H"
 
-      - name: Configure and Compile Kernel
+      - name: Configure Kernel
         run: |
           set -e
-          set -o pipefail
           cd kernel
           export PATH="$(pwd)/../clang/bin:$PATH"
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export HEADER_ARCH=arm64
-          export KCFLAGS="-Wno-error"
 
-          if [ -f "arch/arm64/configs/vendor/phoenix_defconfig" ]; then
-            DEFCONFIG="vendor/phoenix_defconfig"
-          elif [ -f "arch/arm64/configs/phoenix_defconfig" ]; then
-            DEFCONFIG="phoenix_defconfig"
-          elif [ -f "arch/arm64/configs/vendor/phoenix-perf_defconfig" ]; then
-            DEFCONFIG="vendor/phoenix-perf_defconfig"
-          else
-            DEFCONFIG="$(find arch/arm64/configs/ -name '*phoenix*' | head -n 1 | sed 's|arch/arm64/configs/||')"
-          fi
+          # PE twelve places the defconfig under vendor/
+          DEFCONFIG="vendor/phoenix_defconfig"
           echo "Target defconfig: $DEFCONFIG"
 
           make O=out ARCH=arm64 "$DEFCONFIG"
 
+          # Enable NetHunter-specific options
           ./scripts/config --file out/.config \
             -e CONFIG_IKCONFIG \
             -e CONFIG_IKCONFIG_PROC \
@@ -138,78 +129,84 @@ jobs:
             -e CONFIG_PACKET \
             -e CONFIG_RFKILL
 
+          # Build ath9k_htc as a loadable module
           ./scripts/config --file out/.config --module CONFIG_ATH9K_HTC || true
 
           make O=out ARCH=arm64 \
             CC=clang \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
             olddefconfig
 
+      - name: Compile Kernel
+        run: |
+          set -e
+          set -o pipefail
+          cd kernel
+          export PATH="$(pwd)/../clang/bin:$PATH"
+
+          # Explicit targets: Image.gz-dtb (kernel+dtb) and dtbo.img (overlay)
+          # LD=ld.lld is required because Proton Clang does not ship GNU ld
           make -j"$(nproc --all)" O=out \
             ARCH=arm64 \
             CC=clang \
+            LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
             AR=llvm-ar \
             NM=llvm-nm \
             OBJCOPY=llvm-objcopy \
             OBJDUMP=llvm-objdump \
             STRIP=llvm-strip \
             KCFLAGS="-Wno-error" \
+            Image.gz-dtb dtbo.img \
             2>&1 | tee ../build.log
 
-          echo "=== Verifying build outputs ==="
-          ls -la out/arch/arm64/boot/ || true
+          echo "=== Build outputs ==="
+          ls -la out/arch/arm64/boot/
 
-          # AUTOPSY: if no kernel image exists, print the actual fatal error
-          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ] && [ ! -f out/arch/arm64/boot/Image-dtb ] && [ ! -f out/arch/arm64/boot/Image.gz ] && [ ! -f out/arch/arm64/boot/Image ]; then
-            echo ""
-            echo "============================================================"
-            echo "FATAL: Kernel image not found. Build failed. Actual error:"
-            echo "============================================================"
-            grep -n -E "make\[*]: \*\*\*|error:|Error [0-9]+|NameError|SyntaxError|fatal error:" ../build.log | tail -25
-            echo "============================================================"
+      - name: Verify Kernel Outputs
+        run: |
+          set -e
+          cd kernel
+
+          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            echo "ERROR: Kernel image (Image.gz-dtb) was not built."
+            echo "Dumping last 30 fatal lines from build.log:"
+            grep -n -E "make\[*]: \*\*\*|error:|Error [0-9]+|NameError|SyntaxError|fatal error:" ../build.log | tail -30
             exit 1
           fi
 
-      - name: Collect modules
+          if [ ! -f out/arch/arm64/boot/dtbo.img ]; then
+            echo "ERROR: dtbo.img was not built."
+            echo "Dumping last 30 fatal lines from build.log:"
+            grep -n -E "make\[*]: \*\*\*|error:|Error [0-9]+|NameError|SyntaxError|fatal error:" ../build.log | tail -30
+            exit 1
+          fi
+
+          echo "Kernel image and dtbo.img built successfully."
+
+      - name: Collect Modules
         run: |
           set -e
           cd kernel
           mkdir -p ../mods
+
           make O=out ARCH=arm64 INSTALL_MOD_PATH="$(pwd)/../mods_install" modules_install || true
+
           find out ../mods_install -name 'ath9k_htc.ko' -exec cp -v {} ../mods/ \; 2>/dev/null || true
           find out ../mods_install -name 'ath*.ko' -exec cp -v {} ../mods/ \; 2>/dev/null || true
+
           ls -la ../mods || true
 
       - name: Package with AnyKernel3
         run: |
           set -e
-          IMAGE_PATH=""
-          for cand in \
-            kernel/out/arch/arm64/boot/Image.gz-dtb \
-            kernel/out/arch/arm64/boot/Image-dtb \
-            kernel/out/arch/arm64/boot/Image.gz \
-            kernel/out/arch/arm64/boot/Image
-          do
-            if [ -f "$cand" ]; then
-              IMAGE_PATH="$cand"
-              break
-            fi
-          done
 
-          if [ -z "$IMAGE_PATH" ]; then
-            echo "ERROR: no kernel image found."
-            exit 1
-          fi
-
-          echo "Using kernel image: $IMAGE_PATH"
-          cp "$IMAGE_PATH" AnyKernel3/Image.gz-dtb 2>/dev/null || cp "$IMAGE_PATH" AnyKernel3/
-
-          if [ -f kernel/out/arch/arm64/boot/dtbo.img ]; then
-            cp kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
-          fi
+          cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+          cp kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/
 
           mkdir -p AnyKernel3/modules/system/lib/modules
           cp mods/*.ko AnyKernel3/modules/system/lib/modules/ 2>/dev/null || true
@@ -221,12 +218,13 @@ jobs:
           zip -r9 ../NetHunter-Kernel-Phoenix-PE12.zip *
 
       - name: Upload Flashable Zip
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: NetHunter-Kernel-Phoenix-PE12
           path: NetHunter-Kernel-Phoenix-PE12.zip
 
-      - name: Upload build log if failed
+      - name: Upload Build Log on Failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
