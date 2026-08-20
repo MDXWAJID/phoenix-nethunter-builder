@@ -34,15 +34,21 @@ jobs:
 
       - name: Patch Python 3 compatibility for dtbo generation
         run: |
-          # The kernel's mkdtboimg.py is written for Python 2 but runs under Python 3
+          set -e
           MKDTBO="kernel/scripts/dtc/libfdt/mkdtboimg.py"
-          if [ -f "$MKDTBO" ]; then
-            sed -i 's/xrange/range/g' "$MKDTBO"
-            sed -i 's/if version is 0:/if version == 0:/g' "$MKDTBO"
-            echo "Patched $MKDTBO for Python 3"
-          else
-            echo "Warning: mkdtboimg.py not found at expected path"
+          if [ ! -f "$MKDTBO" ]; then
+            echo "ERROR: mkdtboimg.py not found at $MKDTBO"
+            exit 1
           fi
+          # Fix Python 2 -> 3 incompatibilities that break dtbo.img packaging
+          sed -i 's/xrange/range/g' "$MKDTBO"
+          sed -i 's/if version is 0:/if version == 0:/g' "$MKDTBO"
+          # Verify the patch stuck
+          if grep -q 'xrange' "$MKDTBO"; then
+            echo "ERROR: Failed to patch xrange in mkdtboimg.py"
+            exit 1
+          fi
+          echo "Patched $MKDTBO for Python 3"
 
       - name: Apply ath9k HTC symbol rename fix
         run: |
@@ -81,6 +87,7 @@ jobs:
       - name: Configure and Compile Kernel
         run: |
           set -e
+          set -o pipefail
           cd kernel
           export PATH="$(pwd)/../clang/bin:$PATH"
           export ARCH=arm64
@@ -156,6 +163,9 @@ jobs:
             KCFLAGS="-Wno-error" \
             2>&1 | tee ../build.log
 
+          echo "=== Build outputs ==="
+          ls -la out/arch/arm64/boot/ || true
+
       - name: Collect modules
         run: |
           set -e
@@ -183,9 +193,9 @@ jobs:
           done
 
           if [ -z "$IMAGE_PATH" ]; then
-            echo "ERROR: no kernel image"
-            ls -laR kernel/out/arch/arm64/boot || true
-            tail -n 80 build.log || true
+            echo "ERROR: no kernel image found in kernel/out/arch/arm64/boot/"
+            echo "Last 100 lines of build.log:"
+            tail -n 100 build.log || true
             exit 1
           fi
 
