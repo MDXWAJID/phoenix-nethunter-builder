@@ -49,6 +49,14 @@ jobs:
           # Force it to start as a bytes object instead.
           sed -i 's/dt_entry_buf = ""/dt_entry_buf = b""/' kernel/scripts/dtc/libfdt/mkdtboimg.py
 
+          # FIX: _update_metadata() builds the header buffer using
+          # array('c', ' ' * size) — the 'c' typecode (byte string) was
+          # removed from Python's array module in Python 3, causing:
+          # TypeError: cannot use a str to initialize an array with typecode 'c'
+          # A bytearray behaves the same way for struct.pack_into() and
+          # file.write(), so swap it in directly.
+          sed -i "s/self.__metadata = array('c', ' ' \* self.__metadata_size)/self.__metadata = bytearray(self.__metadata_size)/" kernel/scripts/dtc/libfdt/mkdtboimg.py
+
           # Verify the known fatal file is clean
           if grep -q 'xrange' kernel/scripts/dtc/libfdt/mkdtboimg.py; then
             echo "ERROR: Failed to patch xrange in mkdtboimg.py"
@@ -56,6 +64,10 @@ jobs:
           fi
           if grep -q 'dt_entry_buf = ""' kernel/scripts/dtc/libfdt/mkdtboimg.py; then
             echo "ERROR: Failed to patch dt_entry_buf bytes fix in mkdtboimg.py"
+            exit 1
+          fi
+          if grep -q "array('c'" kernel/scripts/dtc/libfdt/mkdtboimg.py; then
+            echo "ERROR: Failed to patch array('c', ...) bytearray fix in mkdtboimg.py"
             exit 1
           fi
           echo "Python DTC scripts patched for Python 3"
