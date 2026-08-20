@@ -42,9 +42,20 @@ jobs:
             sed -i 's/if version is 0:/if version == 0:/g' "$f"
             sed -i 's/if version is not 0:/if version != 0:/g' "$f"
           done
+
+          # FIX: mkdtboimg.py initializes dt_entry_buf as a str ("") but later
+          # concatenates bytes (compressed_entry) onto it, causing:
+          # TypeError: can only concatenate str (not "bytes") to str
+          # Force it to start as a bytes object instead.
+          sed -i 's/dt_entry_buf = ""/dt_entry_buf = b""/' kernel/scripts/dtc/libfdt/mkdtboimg.py
+
           # Verify the known fatal file is clean
           if grep -q 'xrange' kernel/scripts/dtc/libfdt/mkdtboimg.py; then
             echo "ERROR: Failed to patch xrange in mkdtboimg.py"
+            exit 1
+          fi
+          if grep -q 'dt_entry_buf = ""' kernel/scripts/dtc/libfdt/mkdtboimg.py; then
+            echo "ERROR: Failed to patch dt_entry_buf bytes fix in mkdtboimg.py"
             exit 1
           fi
           echo "Python DTC scripts patched for Python 3"
