@@ -32,6 +32,18 @@ jobs:
         run: |
           git clone https://github.com/kdrag0n/proton-clang.git --depth=1 clang
 
+      - name: Patch Python 3 compatibility for dtbo generation
+        run: |
+          # The kernel's mkdtboimg.py is written for Python 2 but runs under Python 3
+          MKDTBO="kernel/scripts/dtc/libfdt/mkdtboimg.py"
+          if [ -f "$MKDTBO" ]; then
+            sed -i 's/xrange/range/g' "$MKDTBO"
+            sed -i 's/if version is 0:/if version == 0:/g' "$MKDTBO"
+            echo "Patched $MKDTBO for Python 3"
+          else
+            echo "Warning: mkdtboimg.py not found at expected path"
+          fi
+
       - name: Apply ath9k HTC symbol rename fix
         run: |
           set -e
