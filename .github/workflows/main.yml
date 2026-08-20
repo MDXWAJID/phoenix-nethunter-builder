@@ -105,6 +105,28 @@ jobs:
           fi
           head -n 40 "$HTC_H"
 
+      - name: Fix ufshcd duplicate symbol linker error
+        run: |
+          set -e
+          cd kernel
+          UFS_MK="drivers/scsi/ufs/Makefile"
+          if [ ! -f "$UFS_MK" ]; then
+            echo "ERROR: $UFS_MK not found"
+            exit 1
+          fi
+          # This tree's Makefile builds ufshcd.c twice: once wrapped into
+          # ufshcd-core.o (via "ufshcd-core-y := ufshcd.o"), and again as a
+          # standalone "ufshcd.o" object. Both end up built-in, so ld.lld
+          # fails with "duplicate symbol" for every function in ufshcd.c.
+          # Fix: drop the redundant standalone line, keep the composite one.
+          if grep -qE '^obj-\$\(CONFIG_SCSI_UFSHCD\) \+= ufshcd\.o$' "$UFS_MK"; then
+            sed -i '/^obj-\$(CONFIG_SCSI_UFSHCD) += ufshcd\.o$/d' "$UFS_MK"
+            echo "Removed duplicate 'ufshcd.o' obj-y line from $UFS_MK"
+          else
+            echo "Duplicate line not found (already patched or upstream changed) - skipping"
+          fi
+          cat "$UFS_MK"
+
       - name: Configure Kernel
         run: |
           set -e
