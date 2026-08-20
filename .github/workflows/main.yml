@@ -206,7 +206,10 @@ jobs:
           cd kernel
           export PATH="$(pwd)/../clang/bin:$PATH"
 
-          # Explicit targets: Image.gz-dtb (kernel+dtb) and dtbo.img (overlay)
+          # Explicit targets: Image.gz-dtb (kernel+dtb), dtbo.img (overlay),
+          # and modules (builds every =m driver, including ath9k_htc.ko).
+          # Without "modules" here, anything set to =m in .config is silently
+          # never compiled - the config being right means nothing on its own.
           # LD=ld.lld is required because Proton Clang does not ship GNU ld
           make -j"$(nproc --all)" O=out \
             ARCH=arm64 \
@@ -221,7 +224,7 @@ jobs:
             OBJDUMP=llvm-objdump \
             STRIP=llvm-strip \
             KCFLAGS="-Wno-error" \
-            Image.gz-dtb dtbo.img \
+            Image.gz-dtb dtbo.img modules \
             2>&1 | tee ../build.log
 
           echo "=== Build outputs ==="
@@ -317,9 +320,36 @@ jobs:
           name: NetHunter-Kernel-Phoenix-PE12
           path: NetHunter-Kernel-Phoenix-PE12.zip
 
+      - name: Debug Summary
+        if: always()
+        run: |
+          {
+            echo "=== BOOT IMAGE FILES ==="
+            ls -la kernel/out/arch/arm64/boot/ 2>&1 || echo "(kernel/out/arch/arm64/boot/ missing)"
+            echo ""
+            echo "=== ATH9K CONFIG STATE ==="
+            grep -E "CONFIG_ATH9K_HTC=|CONFIG_ATH9K_COMMON=|CONFIG_ATH9K_HW=|CONFIG_ATH_COMMON=" kernel/out/.config 2>&1 || echo "(.config missing)"
+            echo ""
+            echo "=== MODULES COLLECTED ==="
+            ls -la mods/*.ko 2>&1 || echo "(no mods collected)"
+            echo ""
+            echo "=== ANY .ko ANYWHERE IN BUILD TREE ==="
+            find kernel/out -name '*.ko' 2>&1 | head -30 || echo "(none found)"
+            echo ""
+            echo "=== FINAL ZIP CONTENTS ==="
+            unzip -l NetHunter-Kernel-Phoenix-PE12.zip 2>&1 || echo "(zip was never created)"
+            echo ""
+            echo "=== anykernel.sh KEY LINES ==="
+            grep -E "do.devicecheck|^BLOCK=|IS_SLOT_DEVICE" AnyKernel3/anykernel.sh 2>&1 || echo "(anykernel.sh missing)"
+          } > debug-summary.log 2>&1
+          cat debug-summary.log
+
       - name: Upload Build Log on Failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: build.log
+          path: |
+            build.log
+            debug-summary.log
+          if-no-files-found: warn
