@@ -18,7 +18,7 @@ jobs:
             libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc \
             zip zlib1g-dev python3 wget ca-certificates
 
-      - name: Clone Kernel Source & AnyKernel3
+      - name: Clone Kernel Source and AnyKernel3
         run: |
           git clone https://github.com/PixelExperience-Devices/kernel_xiaomi_phoenix.git -b twelve kernel --depth=1
           git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
@@ -27,53 +27,49 @@ jobs:
         run: |
           git clone https://github.com/kdrag0n/proton-clang.git --depth=1 clang
 
-      - name: Apply ath9k / QCA HTC collision fix
+      - name: Apply ath9k HTC symbol rename fix
         run: |
           set -e
           cd kernel
-
-          # 1) Prefix-rename ath9k HTC exports so they cannot collide with qca-wifi-host-cmn
           HTC_H="drivers/net/wireless/ath/ath9k/htc.h"
-          if [ -f "$HTC_H" ]; then
-            # Insert renames once, after the include guard
-            grep -q 'ath9k_htc_stop' "$HTC_H" || sed -i '/#define HTC_H/a \
-\
-/* NetHunter: avoid multiple definition with qca-wifi-host-cmn HTC */\
-#define htc_stop                     ath9k_htc_stop\
-#define htc_start                    ath9k_htc_start\
-#define htc_init                     ath9k_htc_init\
-#define htc_cleanup                  ath9k_htc_cleanup\
-#define htc_connect_service          ath9k_htc_connect_service\
-#define htc_connect_service_complete ath9k_htc_connect_service_complete\
-#define htc_send                     ath9k_htc_send\
-#define htc_send_epid                ath9k_htc_send_epid\
-#define htc_tx_completion            ath9k_htc_tx_completion\
-#define htc_rx_completion            ath9k_htc_rx_completion\
-#define htc_credit_distribution      ath9k_htc_credit_distribution\
-#define htc_setup_credit             ath9k_htc_setup_credit\
-' "$HTC_H"
+          if [ ! -f "$HTC_H" ]; then
+            echo "htc.h not found"
+            exit 1
           fi
-
-          # 2) If htc_hst.c still exports un-prefixed globals, force static on internal helpers
-          #    (only touches ath9k copy)
-          if [ -f drivers/net/wireless/ath/ath9k/htc_hst.c ]; then
-            # nothing else required when header renames cover the ld errors
-            true
+          if grep -q "ath9k_htc_stop" "$HTC_H"; then
+            echo "Rename patch already present"
+          else
+            cat > /tmp/ath9k_htc_rename.h << 'EOF'
+          /* NetHunter: avoid multiple definition with qca-wifi-host-cmn HTC */
+          #define htc_stop                     ath9k_htc_stop
+          #define htc_start                    ath9k_htc_start
+          #define htc_init                     ath9k_htc_init
+          #define htc_cleanup                  ath9k_htc_cleanup
+          #define htc_connect_service          ath9k_htc_connect_service
+          #define htc_connect_service_complete ath9k_htc_connect_service_complete
+          #define htc_send                     ath9k_htc_send
+          #define htc_send_epid                ath9k_htc_send_epid
+          #define htc_tx_completion            ath9k_htc_tx_completion
+          #define htc_rx_completion            ath9k_htc_rx_completion
+          #define htc_credit_distribution      ath9k_htc_credit_distribution
+          #define htc_setup_credit             ath9k_htc_setup_credit
+          EOF
+            # Insert renames immediately after the include guard line
+            awk '1; /#define HTC_H/{system("cat /tmp/ath9k_htc_rename.h")}' "$HTC_H" > /tmp/htc_h_new
+            mv /tmp/htc_h_new "$HTC_H"
+            echo "Patched $HTC_H"
           fi
-
-          # 3) Silence known harmless noise (optional)
-          # smb1390 cast warning — leave as-is; does not fail link
+          head -n 40 "$HTC_H"
 
       - name: Configure and Compile Kernel
         run: |
           set -e
           cd kernel
-          export PATH=$(pwd)/../clang/bin:$PATH
+          export PATH="$(pwd)/../clang/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
           export HEADER_ARCH=arm64
           export KCFLAGS="-Wno-error"
-          export KBUILD_CFLAGS="-Wno-error"
 
           if [ -f "arch/arm64/configs/vendor/phoenix_defconfig" ]; then
             DEFCONFIG="vendor/phoenix_defconfig"
@@ -82,14 +78,12 @@ jobs:
           elif [ -f "arch/arm64/configs/vendor/phoenix-perf_defconfig" ]; then
             DEFCONFIG="vendor/phoenix-perf_defconfig"
           else
-            DEFCONFIG=$(find arch/arm64/configs/ -name "*phoenix*" | head -n 1 | sed 's|arch/arm64/configs/||')
+            DEFCONFIG="$(find arch/arm64/configs/ -name '*phoenix*' | head -n 1 | sed 's|arch/arm64/configs/||')"
           fi
           echo "Target defconfig: $DEFCONFIG"
 
-          make O=out ARCH=arm64 $DEFCONFIG
+          make O=out ARCH=arm64 "$DEFCONFIG"
 
-          # NetHunter + USB monitor + external Wi‑Fi
-          # NOTE: do NOT disable QCA; only ath9k side is renamed above
           ./scripts/config --file out/.config \
             -e CONFIG_IKCONFIG \
             -e CONFIG_IKCONFIG_PROC \
@@ -122,15 +116,9 @@ jobs:
             -e CONFIG_USB_ETH \
             -e CONFIG_USB_FUNCTIONFS \
             -e CONFIG_PACKET \
-            -e CONFIG_RFKILL \
-            -m CONFIG_RTL8187 \
-            -m CONFIG_RTL8XXXU \
-            -m CONFIG_MEDIA_DIGITAL_TV_SUPPORT \
-            -e CONFIG_CFG80211_WEXT
+            -e CONFIG_RFKILL
 
-          # Prefer modules for USB wifi stacks when possible (reduces vmlinux clashes)
-          ./scripts/config --file out/.config \
-            --module CONFIG_ATH9K_HTC || true
+          ./scripts/config --file out/.config --module CONFIG_ATH9K_HTC || true
 
           make O=out ARCH=arm64 \
             CC=clang \
@@ -138,8 +126,7 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             olddefconfig
 
-          # Build; -Wno-error keeps unused-label / void*-cast warnings from becoming errors
-          make -j$(nproc --all) O=out \
+          make -j"$(nproc --all)" O=out \
             ARCH=arm64 \
             CC=clang \
             CROSS_COMPILE=aarch64-linux-gnu- \
@@ -152,16 +139,14 @@ jobs:
             KCFLAGS="-Wno-error" \
             2>&1 | tee ../build.log
 
-      - name: Collect modules (ath9k_htc etc.)
+      - name: Collect modules
         run: |
           set -e
           cd kernel
           mkdir -p ../mods
-          # Install modules into a temp tree if modules were built
-          make O=out ARCH=arm64 INSTALL_MOD_PATH=$(pwd)/../mods_install modules_install || true
-          find out -name 'ath9k_htc.ko' -exec cp {} ../mods/ \; || true
-          find out -name 'ath*.ko' -exec cp {} ../mods/ \; || true
-          find ../mods_install -name '*.ko' -path '*/ath/*' -exec cp {} ../mods/ \; 2>/dev/null || true
+          make O=out ARCH=arm64 INSTALL_MOD_PATH="$(pwd)/../mods_install" modules_install || true
+          find out ../mods_install -name 'ath9k_htc.ko' -exec cp -v {} ../mods/ \; 2>/dev/null || true
+          find out ../mods_install -name 'ath*.ko' -exec cp -v {} ../mods/ \; 2>/dev/null || true
           ls -la ../mods || true
 
       - name: Package with AnyKernel3
@@ -174,13 +159,15 @@ jobs:
             kernel/out/arch/arm64/boot/Image.gz \
             kernel/out/arch/arm64/boot/Image
           do
-            if [ -f "$cand" ]; then IMAGE_PATH="$cand"; break; fi
+            if [ -f "$cand" ]; then
+              IMAGE_PATH="$cand"
+              break
+            fi
           done
 
           if [ -z "$IMAGE_PATH" ]; then
             echo "ERROR: no kernel image"
             ls -laR kernel/out/arch/arm64/boot || true
-            # dump last link errors for debug
             tail -n 80 build.log || true
             exit 1
           fi
@@ -192,18 +179,12 @@ jobs:
             cp kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/dtbo.img
           fi
 
-          # ship external wifi modules next to the zip payload
           mkdir -p AnyKernel3/modules/system/lib/modules
           cp mods/*.ko AnyKernel3/modules/system/lib/modules/ 2>/dev/null || true
 
           cd AnyKernel3
-          # Phoenix (non-A/B style boot)
           sed -i 's/is_slot_device=auto;/is_slot_device=0;/g' anykernel.sh
           sed -i 's|block=auto;|block=/dev/block/bootdevice/by-name/boot;|g' anykernel.sh
-
-          # Ensure anykernel copies Image correctly
-          grep -q 'Image.gz-dtb' anykernel.sh || true
-
           rm -rf .git
           zip -r9 ../NetHunter-Kernel-Phoenix-PE12.zip *
 
@@ -213,7 +194,7 @@ jobs:
           name: NetHunter-Kernel-Phoenix-PE12
           path: NetHunter-Kernel-Phoenix-PE12.zip
 
-      - name: Upload build log on failure path
+      - name: Upload build log if failed
         if: failure()
         uses: actions/upload-artifact@v4
         with:
