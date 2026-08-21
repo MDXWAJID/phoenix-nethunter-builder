@@ -291,6 +291,14 @@ jobs:
           # refuses to flash on phoenix. Disable the check entirely.
           sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
 
+          # FIX: verified by reading tools/ak3-core.sh directly - module
+          # installation (copying ath9k_htc.ko etc. onto the device) is
+          # gated entirely on do.modules=1. Template default is 0, which
+          # means the .ko files ride along in the zip but never get
+          # installed. This is the actual point of this whole build, so
+          # flip it on.
+          sed -i 's/do.modules=0/do.modules=1/' anykernel.sh
+
           # BLOCK= still pointed at the OMAP (Galaxy Nexus) template path.
           # Replace with phoenix's actual boot partition path.
           sed -i 's|^BLOCK=.*;|BLOCK=/dev/block/bootdevice/by-name/boot;|' anykernel.sh
@@ -303,12 +311,16 @@ jobs:
             echo "ERROR: devicecheck patch failed to apply"
             exit 1
           fi
+          if ! grep -q '^do.modules=1' anykernel.sh; then
+            echo "ERROR: do.modules patch failed to apply - modules would be dead weight in the zip"
+            exit 1
+          fi
           if ! grep -q '^BLOCK=/dev/block/bootdevice/by-name/boot;' anykernel.sh; then
             echo "ERROR: BLOCK path patch failed to apply"
             exit 1
           fi
           echo "anykernel.sh patched correctly:"
-          grep -E "do.devicecheck|^BLOCK=|IS_SLOT_DEVICE" anykernel.sh
+          grep -E "do.devicecheck|do.modules|^BLOCK=|IS_SLOT_DEVICE" anykernel.sh
 
           rm -rf .git
           zip -r9 ../NetHunter-Kernel-Phoenix-PE12.zip *
@@ -340,7 +352,7 @@ jobs:
             unzip -l NetHunter-Kernel-Phoenix-PE12.zip 2>&1 || echo "(zip was never created)"
             echo ""
             echo "=== anykernel.sh KEY LINES ==="
-            grep -E "do.devicecheck|^BLOCK=|IS_SLOT_DEVICE" AnyKernel3/anykernel.sh 2>&1 || echo "(anykernel.sh missing)"
+            grep -E "do.devicecheck|do.modules|^BLOCK=|IS_SLOT_DEVICE" AnyKernel3/anykernel.sh 2>&1 || echo "(anykernel.sh missing)"
           } > debug-summary.log 2>&1
           cat debug-summary.log
 
