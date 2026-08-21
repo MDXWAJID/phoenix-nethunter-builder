@@ -303,6 +303,22 @@ jobs:
           # Replace with phoenix's actual boot partition path.
           sed -i 's|^BLOCK=.*;|BLOCK=/dev/block/bootdevice/by-name/boot;|' anykernel.sh
 
+          # CRITICAL FIX: the boot install section below the properties block
+          # still had example ramdisk-patching code for the Galaxy Nexus
+          # ("tuna") - touching init.tuna.rc and fstab.tuna, files that don't
+          # exist on phoenix. This never got adapted for the real device and
+          # caused a bootloop. Strip it out entirely; phoenix's kernel swap
+          # needs nothing beyond dump_boot / write_boot.
+          sed -i '/^# init\.rc$/,/^write_boot;/{ /^write_boot;/!d }' anykernel.sh
+
+          if grep -q "init.tuna.rc\|fstab.tuna" anykernel.sh; then
+            echo "ERROR: leftover tuna ramdisk-patch lines still present after strip"
+            exit 1
+          fi
+
+          echo "=== boot install section after strip ==="
+          sed -n '/# boot install/,/## end boot install/p' anykernel.sh
+
           # phoenix is not an A/B slot device, so IS_SLOT_DEVICE=0 (already
           # the template default) is correct as-is - no change needed there.
 
