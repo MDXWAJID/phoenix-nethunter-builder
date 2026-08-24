@@ -66,6 +66,22 @@ jobs:
           cd kernel
           echo "KERNEL_PATH=$(pwd)" >> $GITHUB_ENV
 
+       # ─────────────────────────────────────────────
+      # 4.5. Patch unsupported Polly flags (CRITICAL FIX)
+      # ─────────────────────────────────────────────
+      - name: Patch Polly flags
+        run: |
+          cd $KERNEL_PATH
+          echo ">>> Removing unsupported Polly optimization flags from Makefiles..."
+          
+          # AOSP Clang 11 does not include the Polly loop optimizer.
+          # Custom kernels often hardcode these flags, causing LLVM backend errors.
+          # This safely strips them out without breaking Makefile syntax.
+          find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec sed -i 's/-mllvm[[:space:]]*-polly[^[:space:]]*//g' {} +
+          find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec sed -i 's/-Xclang[[:space:]]*-polly[^[:space:]]*//g' {} +
+          
+          echo ">>> Polly flags patched successfully."
+          
       # ─────────────────────────────────────────────
       # 4. Validate defconfig exists
       # ─────────────────────────────────────────────
