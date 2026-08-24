@@ -209,6 +209,7 @@ jobs:
           make O=out ARCH=arm64 ${{ inputs.defconfig }}
 
           # ── NetHunter Config Fragment ──
+          # (YAML block scalar automatically strips leading indentation for valid bash execution)
           cat << 'EOF' >> out/.config
 
           # === Core Module Support ===
@@ -375,11 +376,11 @@ jobs:
           EOF
 
           # Inject LOCALVERSION (controls vermagic string)
-          sed -i "s/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"${{ inputs.localversion }}\"/" out/.config
+          # FIXED: Using scripts/config instead of fragile sed commands to guarantee injection
+          bash $KERNEL_PATH/scripts/config --file out/.config --set-str LOCALVERSION "${{ inputs.localversion }}"
 
           # Disable LOCALVERSION_AUTO so git hash doesn't append unpredictably
-          sed -i 's/CONFIG_LOCALVERSION_AUTO=.*/# CONFIG_LOCALVERSION_AUTO is not set/' out/.config
-          echo "# CONFIG_LOCALVERSION_AUTO is not set" >> out/.config
+          bash $KERNEL_PATH/scripts/config --file out/.config --disable LOCALVERSION_AUTO
 
           # Resolve all dependencies and validate
           make O=out ARCH=arm64 olddefconfig
@@ -425,7 +426,9 @@ jobs:
             echo ">>> WARNING: Using ld.lld — known to cause bootloops on phoenix"
           fi
 
-          export CLANG_TRIPLE=aarch64-linux-gnu-
+          # FIXED: CLANG_TRIPLE must match the GCC toolchain prefix (aarch64-linux-android-)
+          # Prevents 'aarch64-linux-gnu-gcc: not found' errors during linking
+          export CLANG_TRIPLE=aarch64-linux-android-
           export KBUILD_BUILD_USER=NetHunter
           export KBUILD_BUILD_HOST=GitHub-Actions
           export KBUILD_COMPILER_STRING="$($TOOLCHAIN_PATH/clang/bin/clang --version | head -n 1)"
