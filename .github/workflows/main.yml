@@ -155,6 +155,9 @@ jobs:
             [ -f "$f" ] || { echo "✗ Required source file missing: $f"; exit 1; }
           done
 
+          # Fix strict-prototypes error in the Qualcomm battery-saver header.
+          sed -i 's|static inline bool is_battery_saver_on()|static inline bool is_battery_saver_on(void)|' include/linux/battery_saver.h
+
           # Fix SECTOR_SIZE redefinition in dm-bow.c
           sed -i '/^#define SECTOR_SIZE 512$/d' drivers/md/dm-bow.c
 
@@ -168,6 +171,10 @@ jobs:
           # Fix unused variables in zram_drv.c
           sed -i '/char mode_buf\[8\];/d' drivers/block/zram/zram_drv.c
           sed -i 's|ssize_t ret = len, sz;|ssize_t ret = len;|' drivers/block/zram/zram_drv.c
+
+          echo "=== Verify compatibility patches ==="
+          grep -n 'is_battery_saver_on(void)' include/linux/battery_saver.h
+          echo "✓ Source compatibility patches applied"
 
       # ─────────────────────────────────────────────
       # 5. Validate defconfig exists
@@ -432,7 +439,16 @@ jobs:
           chmod +x scripts/config
           scripts/config --file out/.config --set-str LOCALVERSION "${{ inputs.localversion }}"
           scripts/config --file out/.config --disable LOCALVERSION_AUTO
+
+          # Vendor 4.14 source contains legacy warnings that become fatal under Werror.
+          if grep -q '^CONFIG_CC_WERROR=' out/.config; then
+            scripts/config --file out/.config --disable CC_WERROR
+          fi
+
           make O=out ARCH=arm64 olddefconfig
+
+          echo "=== Warning policy ==="
+          grep -E '^CONFIG_CC_WERROR=' out/.config || echo "CONFIG_CC_WERROR is disabled/absent"
 
           echo "=== Config Verification ==="
           for opt in CONFIG_MODULES CONFIG_USB_GADGET CONFIG_MAC80211 CONFIG_ATH9K_HTC CONFIG_CFG80211; do
@@ -457,6 +473,7 @@ jobs:
 
           export PYTHON=python3
           export CROSS_COMPILE=aarch64-linux-android-
+          export REAL_CC=aarch64-linux-android-gcc
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
           export KBUILD_BUILD_USER=NetHunter
           export KBUILD_BUILD_HOST=GitHub-Actions
@@ -479,6 +496,7 @@ jobs:
             PYTHON=$PYTHON \
             CROSS_COMPILE=$CROSS_COMPILE \
             CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
+            KCFLAGS="-Wno-error=strict-prototypes -Wno-error=format -Wno-error=frame-larger-than" \
             HOSTCFLAGS="-Wno-deprecated-declarations" \
             -j$(nproc --all) \
             2>&1 | tee build.log
