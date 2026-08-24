@@ -19,6 +19,13 @@ on:
         description: 'Kernel LOCALVERSION suffix'
         required: true
         default: '-perf-NetHunter-v1'
+      linker:
+        description: 'Linker (ld.bfd is MANDATORY for phoenix stability)'
+        type: choice
+        options:
+          - ld.bfd
+          - ld.lld
+        default: 'ld.bfd'
       build_type:
         description: 'Build type'
         type: choice
@@ -43,11 +50,10 @@ jobs:
           sudo apt-get clean
 
       # ─────────────────────────────────────────────
-      # 2. Install build dependencies
+      # 2. Install build dependencies (FIXED: Added python2)
       # ─────────────────────────────────────────────
       - name: Install dependencies
         run: |
-          sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             git ccache automake flex lzop bison gperf build-essential zip curl \
@@ -55,10 +61,20 @@ jobs:
             squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng bc \
             libstdc++6 libncurses5 wget python3 python3-pip gcc clang libssl-dev \
             rsync flex bison aria2 libelf-dev libncurses-dev libffi-dev libyaml-dev \
-            device-tree-compiler libcap-dev libc6:i386 libncurses5:i386 libstdc++6:i386
+            device-tree-compiler libcap-dev python2
 
       # ─────────────────────────────────────────────
-      # 3. Clone kernel source
+      # 3. Setup ccache
+      # ─────────────────────────────────────────────
+      - name: Setup ccache
+        run: |
+          mkdir -p ~/.ccache
+          echo "max_size = 5G" > ~/.ccache/ccache.conf
+          echo "compression = true" >> ~/.ccache/ccache.conf
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 4. Clone kernel source
       # ─────────────────────────────────────────────
       - name: Clone kernel source
         run: |
@@ -66,103 +82,81 @@ jobs:
           cd kernel
           echo "KERNEL_PATH=$(pwd)" >> $GITHUB_ENV
 
-       # ─────────────────────────────────────────────
-      # 4.5. Patch unsupported Polly flags (CRITICAL FIX)
       # ─────────────────────────────────────────────
-      - name: Patch Polly flags
+      # 4.5. Patch Kernel Build Environment (CRITICAL FIXES)
+      # ─────────────────────────────────────────────
+      - name: Patch Polly & Python issues
         run: |
           cd $KERNEL_PATH
-          echo ">>> Removing unsupported Polly optimization flags from Makefiles..."
           
+          echo ">>> [1/2] Removing unsupported Polly optimization flags..."
           # AOSP Clang 11 does not include the Polly loop optimizer.
-          # Custom kernels often hardcode these flags, causing LLVM backend errors.
-          # This safely strips them out without breaking Makefile syntax.
+          # This strips the flags out of all Makefiles to prevent LLVM backend errors.
           find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec sed -i 's/-mllvm[[:space:]]*-polly[^[:space:]]*//g' {} +
           find . -type f \( -name 'Makefile' -o -name '*.mk' \) -exec sed -i 's/-Xclang[[:space:]]*-polly[^[:space:]]*//g' {} +
           
-          echo ">>> Polly flags patched successfully."
-          
+          echo ">>> [2/2] Verifying Python 2 for DTBO generation..."
+          # Failsafe: If python2 failed to install on the runner, patch the kernel to use python3
+          if ! command -v python2 &> /dev/null; then
+            echo "WARNING: python2 not found in PATH. Patching Makefiles to use python3..."
+            find . -type f -name "Makefile*" -exec sed -i 's/python2/python3/g' {} +
+            find . -type f -name "dtboimg" -exec sed -i 's/python2/python3/g' {} +
+            # Fix legacy python2 print syntax in dtboimg scripts just in case
+            find . -type f -name "mkdtboimg.py" -exec sed -i 's/print "\(.*\)"/print("\1")/g' {} +
+          fi
+          echo ">>> Patches applied successfully."
+
       # ─────────────────────────────────────────────
-      # 4. Validate defconfig exists
+      # 5. DISCOVER & VALIDATE DEFCONFIG
       # ─────────────────────────────────────────────
-      - name: Validate defconfig
+      - name: Discover available defconfigs
         run: |
           cd $KERNEL_PATH
-          if [ ! -f "arch/arm64/configs/${{ inputs.defconfig }}" ]; then
-            echo "✗ defconfig NOT FOUND: arch/arm64/configs/${{ inputs.defconfig }}"
-            find arch/arm64/configs/ -name "*defconfig*" | sort
+          echo "=== ALL defconfigs in arch/arm64/configs/ ==="
+          find arch/arm64/configs/ -type f -name "*defconfig*" | sort || echo "No defconfigs found!"
+          
+          echo ""
+          echo "=== Checking for YOUR defconfig: ${{ inputs.defconfig }} ==="
+          if [ -f "arch/arm64/configs/${{ inputs.defconfig }}" ]; then
+            echo "✓ FOUND: arch/arm64/configs/${{ inputs.defconfig }}"
+          else
+            echo "✗ NOT FOUND: arch/arm64/configs/${{ inputs.defconfig }}"
+            echo "Aborting. Pick a valid defconfig from the list above."
             exit 1
           fi
-          echo "✓ defconfig FOUND"
 
       # ─────────────────────────────────────────────
-      # 5. CRITICAL FIX: Replace gcc-wrapper.py
-      #    - Fixes Python 3 bytes/string crash
-      #    - Redirects GCC → Clang (Clang supports cortex-a76, GCC 4.9 does not)
-      # ─────────────────────────────────────────────
-      - name: Replace gcc-wrapper.py with Clang redirector
-        run: |
-          cd $KERNEL_PATH
-          cat > scripts/gcc-wrapper.py << 'PYEOF'
-          #!/usr/bin/env python3
-          import sys
-          import subprocess
-          import os
-
-          def main():
-              args = sys.argv[1:]
-              if not args:
-                  return 1
-
-              # GCC 4.9 does not support -mcpu=cortex-a76.cortex-a55 (Poco X2 CPU).
-              # Redirect gcc calls to Clang which natively supports this target.
-              compiler = os.path.basename(args[0])
-              if 'gcc' in compiler:
-                  args[0] = 'clang'
-              elif 'g++' in compiler:
-                  args[0] = 'clang++'
-
-              proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-              stdout, stderr = proc.communicate()
-
-              sys.stdout.buffer.write(stdout)
-              sys.stderr.buffer.write(stderr)
-
-              return proc.returncode
-
-          if __name__ == '__main__':
-              sys.exit(main())
-          PYEOF
-
-          chmod +x scripts/gcc-wrapper.py
-          echo ">>> gcc-wrapper.py replaced. Contents:"
-          cat scripts/gcc-wrapper.py
-          python3 -m py_compile scripts/gcc-wrapper.py && echo "✓ Syntax OK" || exit 1
-
-      # ─────────────────────────────────────────────
-      # 6. Download AOSP Clang + GCC binutils
+      # 6. Download AOSP Clang + GCC toolchain
       # ─────────────────────────────────────────────
       - name: Setup toolchain
         run: |
           mkdir -p $HOME/toolchain
           cd $HOME/toolchain
 
-          # AOSP Clang 11.0.2
+          # ── AOSP Clang 11.0.2 (Android 11 / R) ──
+          echo ">>> Downloading AOSP Clang..."
           wget --progress=dot:giga -O clang.tar.gz \
             "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android-11.0.0_r48/clang-r383902.tar.gz" || \
           wget --progress=dot:giga -O clang.tar.gz \
             "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz"
 
+          # Verify it's a valid tar.gz (not an HTML error page)
           if ! tar -tzf clang.tar.gz >/dev/null 2>&1; then
-            echo "ERROR: clang.tar.gz is corrupt"
+            echo "ERROR: clang.tar.gz is not a valid archive. Download failed."
             exit 1
           fi
-          mkdir clang && tar -xzf clang.tar.gz -C clang
 
-          # AOSP GCC 4.9 binutils (for ld, ar, nm, etc.)
+          mkdir clang && tar -xzf clang.tar.gz -C clang
+          echo ">>> Clang installed at: $(pwd)/clang"
+          ls clang/bin/clang || { echo "ERROR: clang binary missing!"; exit 1; }
+
+          # ── AOSP GCC 4.9 from LineageOS mirrors (reliable in CI) ──
+          echo ">>> Cloning GCC aarch64 from LineageOS mirror..."
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
             gcc64
+
+          echo ">>> Cloning GCC arm from LineageOS mirror..."
           git clone --depth=1 \
             https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
             gcc32
@@ -170,16 +164,46 @@ jobs:
           echo "TOOLCHAIN_PATH=$HOME/toolchain" >> $GITHUB_ENV
 
       # ─────────────────────────────────────────────
-      # 7. VERIFY toolchain
+      # 7. VERIFY toolchain binaries (CRITICAL FIX)
       # ─────────────────────────────────────────────
-      - name: Verify toolchain
+      - name: Verify toolchain binaries
         run: |
-          export PATH=$TOOLCHAIN_PATH/gcc64/bin:$TOOLCHAIN_PATH/gcc32/bin:$TOOLCHAIN_PATH/clang/bin:$PATH
-          echo "=== Clang ==="
-          clang --version || exit 1
-          echo "=== Cross LD ==="
-          aarch64-linux-android-ld --version || exit 1
-          echo "✓ Toolchain OK"
+          echo "=== Verifying all required toolchain binaries ==="
+          
+          REQUIRED=(
+            "$TOOLCHAIN_PATH/clang/bin/clang"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-gcc"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-ld"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-ar"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-nm"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-objcopy"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-objdump"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-strip"
+            "$TOOLCHAIN_PATH/gcc32/bin/arm-linux-androideabi-gcc"
+            "$TOOLCHAIN_PATH/gcc32/bin/arm-linux-androideabi-ld"
+          )
+
+          FAIL=0
+          for bin in "${REQUIRED[@]}"; do
+            if [ -f "$bin" ]; then
+              echo "✓ $(basename $bin)"
+            else
+              echo "✗ MISSING: $bin"
+              FAIL=1
+            fi
+          done
+
+          if [ $FAIL -eq 1 ]; then
+            echo ""
+            echo "=== Contents of gcc64/bin ==="
+            ls -la $TOOLCHAIN_PATH/gcc64/bin/ 2>/dev/null || echo "Directory missing!"
+            echo ""
+            echo "=== Contents of gcc32/bin ==="
+            ls -la $TOOLCHAIN_PATH/gcc32/bin/ 2>/dev/null || echo "Directory missing!"
+            exit 1
+          fi
+
+          echo ">>> All toolchain binaries verified."
 
       # ─────────────────────────────────────────────
       # 8. Clone AnyKernel3
@@ -194,15 +218,18 @@ jobs:
       - name: Configure kernel
         run: |
           cd $KERNEL_PATH
+
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH=$TOOLCHAIN_PATH/gcc64/bin:$TOOLCHAIN_PATH/gcc32/bin:$TOOLCHAIN_PATH/clang/bin:$PATH
 
+          # Clean build if requested
           if [ "${{ inputs.build_type }}" == "clean" ]; then
             make O=out clean
             make O=out mrproper
           fi
 
+          # Generate base defconfig
           make O=out ARCH=arm64 ${{ inputs.defconfig }}
 
           # ── NetHunter Config Fragment ──
@@ -294,7 +321,7 @@ jobs:
           CONFIG_RT2500USB=m
           CONFIG_CARL9170=m
 
-          # === USB Gadget / HID ===
+          # === USB Gadget / HID (NetHunter USB arsenal) ===
           CONFIG_USB_HIDDEV=y
           CONFIG_USB_GADGET=y
           CONFIG_USB_CONFIGFS=y
@@ -371,15 +398,24 @@ jobs:
           CONFIG_BT_6LOWPAN=m
           EOF
 
-          sed -i "s/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"${{ inputs.localversion }}\"/" out/.config
-          sed -i 's/CONFIG_LOCALVERSION_AUTO=.*/# CONFIG_LOCALVERSION_AUTO is not set/' out/.config
-          echo "# CONFIG_LOCALVERSION_AUTO is not set" >> out/.config
+          # Inject LOCALVERSION (controls vermagic string)
+          # FIXED: Using scripts/config instead of fragile sed commands to guarantee injection
+          bash $KERNEL_PATH/scripts/config --file out/.config --set-str LOCALVERSION "${{ inputs.localversion }}"
 
+          # Disable LOCALVERSION_AUTO so git hash doesn't append unpredictably
+          bash $KERNEL_PATH/scripts/config --file out/.config --disable LOCALVERSION_AUTO
+
+          # Resolve all dependencies and validate
           make O=out ARCH=arm64 olddefconfig
 
+          # Verify critical options are enabled
           echo "=== Config Verification ==="
           for opt in CONFIG_MODULES CONFIG_USB_GADGET CONFIG_MAC80211 CONFIG_ATH9K_HTC CONFIG_CFG80211; do
-            grep -q "^$opt=[ym]" out/.config && echo "✓ $opt" || echo "✗ $opt MISSING"
+            if grep -q "^$opt=[ym]" out/.config; then
+              echo "✓ $opt enabled"
+            else
+              echo "✗ $opt MISSING — build may fail"
+            fi
           done
 
       # ─────────────────────────────────────────────
@@ -391,48 +427,59 @@ jobs:
 
           export ARCH=arm64
           export SUBARCH=arm64
+          # GCC binutils FIRST in PATH so GNU ld is found before ld.lld
           export PATH=$TOOLCHAIN_PATH/gcc64/bin:$TOOLCHAIN_PATH/gcc32/bin:$TOOLCHAIN_PATH/clang/bin:$PATH
 
-          # Explicitly use Clang. The gcc-wrapper.py redirector will catch any
-          # Makefile-hardcoded gcc calls and forward them to clang.
-          export CC=clang
-          export CXX=clang++
           export CROSS_COMPILE=aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export LD=aarch64-linux-android-ld
+          export CROSS_COMPILE_COMPAT=arm-linux-androideabi-
+          export CC="ccache clang"
+          export CXX="ccache clang++"
           export AR=llvm-ar
           export NM=llvm-nm
           export OBJCOPY=llvm-objcopy
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
 
+          # ── CRITICAL: Use GNU ld (bfd) to prevent previous ld.lld bootloop ──
+          if [ "${{ inputs.linker }}" == "ld.bfd" ]; then
+            export LD=aarch64-linux-android-ld
+            echo ">>> Using GNU ld (bfd) — STABLE for phoenix"
+          else
+            export LD=ld.lld
+            echo ">>> WARNING: Using ld.lld — known to cause bootloops on phoenix"
+          fi
+
+          # FIXED: CLANG_TRIPLE must match the GCC toolchain prefix (aarch64-linux-android-)
+          # Prevents 'aarch64-linux-gnu-gcc: not found' errors during linking
+          export CLANG_TRIPLE=aarch64-linux-android-
           export KBUILD_BUILD_USER=NetHunter
           export KBUILD_BUILD_HOST=GitHub-Actions
+          export KBUILD_COMPILER_STRING="$($TOOLCHAIN_PATH/clang/bin/clang --version | head -n 1)"
 
-          echo "=== Starting build ==="
-          echo "CC: $CC"
-          echo "CROSS_COMPILE: $CROSS_COMPILE"
-          echo "CLANG_TRIPLE: $CLANG_TRIPLE"
+          echo "=== Starting build with $(nproc --all) jobs ==="
+          echo "Linker: ${{ inputs.linker }}"
+          echo "LOCALVERSION: ${{ inputs.localversion }}"
 
           make O=out ARCH=arm64 \
-            CC=clang \
             -j$(nproc --all) \
             2>&1 | tee build.log
 
+          # Verify output exists
           echo "=== Build outputs ==="
-          ls -la out/arch/arm64/boot/ || echo "No boot output directory!"
+          ls -la out/arch/arm64/boot/
 
       # ─────────────────────────────────────────────
       # 11. Package into AnyKernel3 flashable zip
       # ─────────────────────────────────────────────
       - name: Package AnyKernel3
-        if: success()
         run: |
           cd $HOME/AnyKernel3
+
+          # Clean old artifacts
           rm -f Image* zImage* dtbo.img *.ko
           rm -rf modules/
 
+          # Copy kernel image (phoenix uses Image.gz-dtb)
           if [ -f $KERNEL_PATH/out/arch/arm64/boot/Image.gz-dtb ]; then
             cp $KERNEL_PATH/out/arch/arm64/boot/Image.gz-dtb .
             echo "Using Image.gz-dtb"
@@ -447,22 +494,30 @@ jobs:
             exit 1
           fi
 
+          # Copy dtbo.img if generated
           if [ -f $KERNEL_PATH/out/arch/arm64/boot/dtbo.img ]; then
             cp $KERNEL_PATH/out/arch/arm64/boot/dtbo.img .
+            echo "Using dtbo.img"
           elif [ -f $KERNEL_PATH/out/arch/arm64/boot/dts/qcom/dtbo.img ]; then
             cp $KERNEL_PATH/out/arch/arm64/boot/dts/qcom/dtbo.img .
+            echo "Using dtbo.img from dts/qcom"
           fi
 
+          # Collect all built modules
           mkdir -p modules
           find $KERNEL_PATH/out -name "*.ko" -exec cp {} modules/ \;
           echo "Collected $(ls modules/*.ko 2>/dev/null | wc -l) modules"
 
+          # Strip modules to reduce size
           for mod in modules/*.ko; do
-            llvm-strip --strip-unneeded "$mod" 2>/dev/null || true
+            llvm-strip --strip-unneeded "$mod" 2>/dev/null || \
+            aarch64-linux-android-strip --strip-unneeded "$mod" 2>/dev/null || true
           done
 
+          # Generate anykernel.sh
           cat > anykernel.sh << 'EOF'
           ### AnyKernel setup
+          # properties
           properties() { '
           kernel.string=NetHunter Kernel for Poco X2 (MIUI 12.5.6 / Android 11)
           do.devicecheck=1
@@ -476,17 +531,23 @@ jobs:
           supported.patchlevels=
           '; }
 
+          # shell variables
           block=/dev/block/bootdevice/by-name/boot;
           is_slot_device=0;
           ramdisk_compression=auto;
           patch_vbmeta_flag=auto;
 
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
           . tools/ak3-core.sh;
 
+          # boot install
           dump_boot;
+
           write_boot;
+          ## end boot install
           EOF
 
+          # Build zip
           ZIP_NAME="NetHunter-PocoX2-A11${{ inputs.localversion }}-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "$ZIP_NAME" * -x .git README.md *placeholder
 
@@ -497,7 +558,6 @@ jobs:
       # 12. Upload artifacts
       # ─────────────────────────────────────────────
       - name: Upload kernel zip
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
