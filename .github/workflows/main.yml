@@ -45,18 +45,71 @@ jobs:
       # ─────────────────────────────────────────────
       # 2. Install build dependencies + GCC 10 cross-compilers
       # ─────────────────────────────────────────────
-      - name: Install dependencies
+      - name: Install build dependencies
+        shell: bash
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            git ccache automake flex lzop bison gperf build-essential zip curl \
-            zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 \
-            squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng bc \
-            libstdc++6 libncurses5 wget python3 python3-pip python-is-python3 gcc clang libssl-dev perl \
-            rsync flex bison aria2 libelf-dev libncurses-dev libffi-dev libyaml-dev \
-            device-tree-compiler libcap-dev \
-            gcc-10-aarch64-linux-gnu gcc-10-arm-linux-gnueabihf \
-            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
+          set -euxo pipefail
+
+          echo "=== Runner information ==="
+          lsb_release -a || true
+          uname -a
+          dpkg --print-architecture
+
+          echo "=== Repair dpkg state ==="
+          sudo dpkg --configure -a || true
+          sudo apt-get -f install -y || true
+
+          echo "=== Refresh APT ==="
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+          sudo apt-get update
+
+          echo "=== Enable required Ubuntu repositories ==="
+          sudo add-apt-repository -y universe
+          sudo add-apt-repository -y multiverse
+          sudo apt-get update
+
+          echo "=== Diagnose held/broken packages ==="
+          apt-mark showhold || true
+          dpkg --audit || true
+
+          echo "=== APT diagnostics before GCC 10 ==="
+          echo "--- GCC 10 AArch64 availability ---"
+          apt-cache policy gcc-10-aarch64-linux-gnu || true
+          echo "--- GCC 10 ARM32 availability ---"
+          apt-cache policy gcc-10-arm-linux-gnueabihf || true
+
+          echo "=== Install base build dependencies ==="
+          sudo apt-get install -y --no-install-recommends \
+            git ccache automake flex lzop bison gperf build-essential \
+            zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 \
+            libbz2-dev libbz2-1.0 squashfs-tools pngcrush schedtool \
+            dpkg-dev liblz4-tool make optipng bc libstdc++6 libncurses5 \
+            libncurses-dev wget python3 python3-pip python3-setuptools \
+            gcc g++ clang libssl-dev rsync aria2 libelf-dev libffi-dev \
+            libyaml-dev device-tree-compiler libcap-dev \
+            software-properties-common
+
+          echo "=== Install GCC 10 cross-compilers separately ==="
+          sudo apt-get install -y --no-install-recommends \
+            gcc-10-aarch64-linux-gnu \
+            gcc-10-arm-linux-gnueabihf \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabihf
+
+          echo "=== Install Python compatibility ==="
+          sudo apt-get install -y python-is-python3
+
+          echo "=== Repair dependencies ==="
+          sudo apt-get -f install -y
+
+          echo "=== Verify cross-compilers ==="
+          aarch64-linux-gnu-gcc-10 --version | head -n 1
+          arm-linux-gnueabihf-gcc-10 --version | head -n 1
+
+          echo "=== Final package diagnostics ==="
+          dpkg --audit || true
+          echo "=== APT installation completed successfully ==="
 
       # ─────────────────────────────────────────────
       # 3. Clone kernel source
@@ -113,46 +166,68 @@ jobs:
       # 6. Setup toolchain — GCC 10 cross-compiler
       #    Symlink Ubuntu's gcc-10 as the Android-named toolchain
       # ─────────────────────────────────────────────
-      - name: Setup toolchain
+      - name: Setup GCC 10 toolchain
+        shell: bash
         run: |
-          mkdir -p $HOME/toolchain/gcc10/bin
-          cd $HOME/toolchain/gcc10/bin
+          set -euxo pipefail
 
-          # AArch64 — GCC 10 supports cortex-a76 natively
-          ln -sf /usr/bin/aarch64-linux-gnu-gcc-10 aarch64-linux-android-gcc
-          ln -sf /usr/bin/aarch64-linux-gnu-g++-10 aarch64-linux-android-g++
-          ln -sf /usr/bin/aarch64-linux-gnu-ld aarch64-linux-android-ld
-          ln -sf /usr/bin/aarch64-linux-gnu-ar aarch64-linux-android-ar
-          ln -sf /usr/bin/aarch64-linux-gnu-nm aarch64-linux-android-nm
-          ln -sf /usr/bin/aarch64-linux-gnu-objcopy aarch64-linux-android-objcopy
-          ln -sf /usr/bin/aarch64-linux-gnu-objdump aarch64-linux-android-objdump
-          ln -sf /usr/bin/aarch64-linux-gnu-strip aarch64-linux-android-strip
-          ln -sf /usr/bin/aarch64-linux-gnu-as aarch64-linux-android-as
+          TOOLCHAIN_DIR="$HOME/toolchain/gcc10/bin"
+          mkdir -p "$TOOLCHAIN_DIR"
+
+          # AArch64
+          ln -sf /usr/bin/aarch64-linux-gnu-gcc-10 "$TOOLCHAIN_DIR/aarch64-linux-android-gcc"
+          ln -sf /usr/bin/aarch64-linux-gnu-g++-10 "$TOOLCHAIN_DIR/aarch64-linux-android-g++"
+          ln -sf /usr/bin/aarch64-linux-gnu-ld "$TOOLCHAIN_DIR/aarch64-linux-android-ld"
+          ln -sf /usr/bin/aarch64-linux-gnu-ar "$TOOLCHAIN_DIR/aarch64-linux-android-ar"
+          ln -sf /usr/bin/aarch64-linux-gnu-nm "$TOOLCHAIN_DIR/aarch64-linux-android-nm"
+          ln -sf /usr/bin/aarch64-linux-gnu-objcopy "$TOOLCHAIN_DIR/aarch64-linux-android-objcopy"
+          ln -sf /usr/bin/aarch64-linux-gnu-objdump "$TOOLCHAIN_DIR/aarch64-linux-android-objdump"
+          ln -sf /usr/bin/aarch64-linux-gnu-strip "$TOOLCHAIN_DIR/aarch64-linux-android-strip"
+          ln -sf /usr/bin/aarch64-linux-gnu-as "$TOOLCHAIN_DIR/aarch64-linux-android-as"
 
           # ARM32
-          ln -sf /usr/bin/arm-linux-gnueabihf-gcc-10 arm-linux-androideabi-gcc
-          ln -sf /usr/bin/arm-linux-gnueabihf-g++-10 arm-linux-androideabi-g++
-          ln -sf /usr/bin/arm-linux-gnueabihf-ld arm-linux-androideabi-ld
-          ln -sf /usr/bin/arm-linux-gnueabihf-ar arm-linux-androideabi-ar
-          ln -sf /usr/bin/arm-linux-gnueabihf-nm arm-linux-androideabi-nm
-          ln -sf /usr/bin/arm-linux-gnueabihf-objcopy arm-linux-androideabi-objcopy
-          ln -sf /usr/bin/arm-linux-gnueabihf-objdump arm-linux-androideabi-objdump
-          ln -sf /usr/bin/arm-linux-gnueabihf-strip arm-linux-androideabi-strip
-          ln -sf /usr/bin/arm-linux-gnueabihf-as arm-linux-androideabi-as
+          ln -sf /usr/bin/arm-linux-gnueabihf-gcc-10 "$TOOLCHAIN_DIR/arm-linux-androideabi-gcc"
+          ln -sf /usr/bin/arm-linux-gnueabihf-g++-10 "$TOOLCHAIN_DIR/arm-linux-androideabi-g++"
+          ln -sf /usr/bin/arm-linux-gnueabihf-ld "$TOOLCHAIN_DIR/arm-linux-androideabi-ld"
+          ln -sf /usr/bin/arm-linux-gnueabihf-ar "$TOOLCHAIN_DIR/arm-linux-androideabi-ar"
+          ln -sf /usr/bin/arm-linux-gnueabihf-nm "$TOOLCHAIN_DIR/arm-linux-androideabi-nm"
+          ln -sf /usr/bin/arm-linux-gnueabihf-objcopy "$TOOLCHAIN_DIR/arm-linux-androideabi-objcopy"
+          ln -sf /usr/bin/arm-linux-gnueabihf-objdump "$TOOLCHAIN_DIR/arm-linux-androideabi-objdump"
+          ln -sf /usr/bin/arm-linux-gnueabihf-strip "$TOOLCHAIN_DIR/arm-linux-androideabi-strip"
+          ln -sf /usr/bin/arm-linux-gnueabihf-as "$TOOLCHAIN_DIR/arm-linux-androideabi-as"
 
-          echo "TOOLCHAIN_PATH=$HOME/toolchain" >> $GITHUB_ENV
+          echo "TOOLCHAIN_PATH=$HOME/toolchain" >> "$GITHUB_ENV"
 
-      # ─────────────────────────────────────────────
-      # 7. VERIFY toolchain
-      # ─────────────────────────────────────────────
-      - name: Verify toolchain
-        run: |
-          export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
-          echo "=== GCC Version ==="
+          export PATH="$TOOLCHAIN_DIR:$PATH"
+
+          echo "=== AArch64 compiler ==="
           aarch64-linux-android-gcc --version | head -n 1
-          echo "=== LD Version ==="
+
+          echo "=== ARM32 compiler ==="
+          arm-linux-androideabi-gcc --version | head -n 1
+
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export PATH="$TOOLCHAIN_PATH/gcc10/bin:$PATH"
+
+          echo "=== AArch64 GCC ==="
+          aarch64-linux-android-gcc --version | head -n 1
+
+          echo "=== AArch64 LD ==="
           aarch64-linux-android-ld --version | head -n 1
-          aarch64-linux-android-gcc --version | grep -q "10." && echo "✓ GCC 10 confirmed" || exit 1
+
+          echo "=== ARM32 GCC ==="
+          arm-linux-androideabi-gcc --version | head -n 1
+
+          aarch64-linux-android-gcc --version | grep -q "10\." \
+            && echo "✓ AArch64 GCC 10 confirmed" \
+            || { echo "✗ AArch64 GCC 10 verification failed"; exit 1; }
+
+          arm-linux-androideabi-gcc --version | grep -q "10\." \
+            && echo "✓ ARM32 GCC 10 confirmed" \
+            || { echo "✗ ARM32 GCC 10 verification failed"; exit 1; }
 
       # ─────────────────────────────────────────────
       # 8. Clone AnyKernel3
