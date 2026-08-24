@@ -47,7 +47,6 @@ jobs:
       # ─────────────────────────────────────────────
       - name: Install dependencies
         run: |
-          sudo dpkg --add-architecture i386
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             git ccache automake flex lzop bison gperf build-essential zip curl \
@@ -55,7 +54,7 @@ jobs:
             squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng bc \
             libstdc++6 libncurses5 wget python3 python3-pip gcc clang libssl-dev \
             rsync flex bison aria2 libelf-dev libncurses-dev libffi-dev libyaml-dev \
-            device-tree-compiler libcap-dev libc6:i386 libncurses5:i386 libstdc++6:i386 \
+            device-tree-compiler libcap-dev \
             gcc-10-aarch64-linux-gnu gcc-10-arm-linux-gnueabihf \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
 
