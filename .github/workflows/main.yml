@@ -69,7 +69,7 @@ jobs:
       # ─────────────────────────────────────────────
       # 4. CRITICAL: Patch source before build
       #    - Fixes python2 -> python3 for dtbo.img
-      #    - Replaces unsupported GCC 4.9 CPU flag
+      #    - Replaces ALL instances of cortex-a76 (mcpu AND mtune) for GCC 4.9
       #    - Fixes vendor driver warnings
       # ─────────────────────────────────────────────
       - name: Pre-build source patches
@@ -80,14 +80,14 @@ jobs:
           sed -i 's/python2/python3/g' arch/arm64/boot/Makefile
           echo "✓ Patched arch/arm64/boot/Makefile: python2 -> python3"
 
-          # FATAL FIX #2: GCC 4.9 does not support -mcpu=cortex-a76.cortex-a55.
-          # Replace with a big.LITTLE pair GCC 4.9 understands.
-          for f in arch/arm64/Makefile Makefile; do
-            if [ -f "$f" ]; then
-              sed -i 's/-mcpu=cortex-a76\.cortex-a55/-mcpu=cortex-a57.cortex-a53/g' "$f"
-              sed -i 's/-mcpu=cortex-a76/-mcpu=cortex-a57/g' "$f"
-              echo "✓ Patched $f: replaced unsupported CPU flag for GCC 4.9"
-            fi
+          # FATAL FIX #2: GCC 4.9 does not support cortex-a76 in -mcpu OR -mtune.
+          # Find every Makefile/mk that references it and patch both variants.
+          for f in $(grep -rl 'cortex-a76' . --include='Makefile' --include='*.mk' 2>/dev/null); do
+            sed -i 's/-mcpu=cortex-a76\.cortex-a55/-mcpu=cortex-a57.cortex-a53/g' "$f"
+            sed -i 's/-mcpu=cortex-a76/-mcpu=cortex-a57/g' "$f"
+            sed -i 's/-mtune=cortex-a76\.cortex-a55/-mtune=cortex-a57.cortex-a53/g' "$f"
+            sed -i 's/-mtune=cortex-a76/-mtune=cortex-a57/g' "$f"
+            echo "✓ Patched $f"
           done
 
           # Fix SECTOR_SIZE redefinition in dm-bow.c
@@ -153,7 +153,6 @@ jobs:
 
       # ─────────────────────────────────────────────
       # 7. Download AOSP Clang + GCC binutils
-      #    (Clang kept for compatibility; build uses GCC 4.9)
       # ─────────────────────────────────────────────
       - name: Setup toolchain
         run: |
