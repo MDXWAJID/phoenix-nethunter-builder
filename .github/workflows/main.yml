@@ -6,13 +6,13 @@ on:
       kernel_repo:
         description: 'Kernel source repository'
         required: true
-        default: 'https://github.com/PixelExperience-Devices/kernel_xiaomi_phoenix.git'
+        default: 'https://github.com/Hycon-Devices/kernel_xiaomi_phoenix.git'
       kernel_branch:
-        description: 'Kernel branch (eleven for Android 11)'
+        description: 'Kernel branch (11 for Android 11)'
         required: true
-        default: 'eleven'
+        default: '11'
       defconfig:
-        description: 'Defconfig name (phoenix_defconfig for Poco X2)'
+        description: 'Defconfig name'
         required: true
         default: 'phoenix_defconfig'
       localversion:
@@ -78,32 +78,30 @@ jobs:
       # ─────────────────────────────────────────────
       - name: Clone kernel source
         run: |
+          echo ">>> Cloning ${{ inputs.kernel_repo }} @ ${{ inputs.kernel_branch }}"
           git clone --depth=1 -b ${{ inputs.kernel_branch }} ${{ inputs.kernel_repo }} kernel
           cd kernel
           echo "KERNEL_PATH=$(pwd)" >> $GITHUB_ENV
 
       # ─────────────────────────────────────────────
-      # 5. DISCOVER DEFCONFIG (critical fix)
+      # 5. DISCOVER & VALIDATE DEFCONFIG
       # ─────────────────────────────────────────────
       - name: Discover available defconfigs
         run: |
           cd $KERNEL_PATH
-          echo "=== Available defconfigs in arch/arm64/configs/ ==="
-          ls -1 arch/arm64/configs/ 2>/dev/null || echo "No configs in arch/arm64/configs/"
+          echo "=== Repository: ${{ inputs.kernel_repo }} ==="
+          echo "=== Branch: ${{ inputs.kernel_branch }} ==="
+          echo ""
+          echo "=== ALL defconfigs in arch/arm64/configs/ ==="
+          find arch/arm64/configs/ -type f -name "*defconfig*" | sort || echo "No defconfigs found!"
           
           echo ""
-          echo "=== Available defconfigs in arch/arm64/configs/vendor/ ==="
-          ls -1 arch/arm64/configs/vendor/ 2>/dev/null || echo "No vendor/ subdirectory"
-          
-          echo ""
-          echo "=== Checking for your specified defconfig: ${{ inputs.defconfig }} ==="
+          echo "=== Checking for YOUR defconfig: ${{ inputs.defconfig }} ==="
           if [ -f "arch/arm64/configs/${{ inputs.defconfig }}" ]; then
             echo "✓ FOUND: arch/arm64/configs/${{ inputs.defconfig }}"
-          elif [ -f "arch/arm64/configs/vendor/${{ inputs.defconfig }}" ]; then
-            echo "✓ FOUND: arch/arm64/configs/vendor/${{ inputs.defconfig }}"
           else
-            echo "✗ NOT FOUND: ${{ inputs.defconfig }}"
-            echo "Aborting — use one of the defconfigs listed above."
+            echo "✗ NOT FOUND: arch/arm64/configs/${{ inputs.defconfig }}"
+            echo "Aborting. Pick a valid defconfig from the list above."
             exit 1
           fi
 
