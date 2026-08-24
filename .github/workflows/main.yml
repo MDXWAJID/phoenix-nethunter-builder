@@ -8,7 +8,7 @@ on:
         required: true
         default: 'https://github.com/Hycon-Devices/kernel_xiaomi_phoenix.git'
       kernel_branch:
-        description: 'Kernel branch (11 for Android 11)'
+        description: 'Kernel branch'
         required: true
         default: '11'
       defconfig:
@@ -78,7 +78,6 @@ jobs:
       # ─────────────────────────────────────────────
       - name: Clone kernel source
         run: |
-          echo ">>> Cloning ${{ inputs.kernel_repo }} @ ${{ inputs.kernel_branch }}"
           git clone --depth=1 -b ${{ inputs.kernel_branch }} ${{ inputs.kernel_repo }} kernel
           cd kernel
           echo "KERNEL_PATH=$(pwd)" >> $GITHUB_ENV
@@ -89,9 +88,6 @@ jobs:
       - name: Discover available defconfigs
         run: |
           cd $KERNEL_PATH
-          echo "=== Repository: ${{ inputs.kernel_repo }} ==="
-          echo "=== Branch: ${{ inputs.kernel_branch }} ==="
-          echo ""
           echo "=== ALL defconfigs in arch/arm64/configs/ ==="
           find arch/arm64/configs/ -type f -name "*defconfig*" | sort || echo "No defconfigs found!"
           
@@ -113,35 +109,87 @@ jobs:
           mkdir -p $HOME/toolchain
           cd $HOME/toolchain
 
-          # AOSP Clang 11.0.2 (Android 11 / R)
-          wget -q \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android-11.0.0_r48/clang-r383902.tar.gz" \
-            -O clang.tar.gz || \
-          wget -q \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" \
-            -O clang.tar.gz
+          # ── AOSP Clang 11.0.2 (Android 11 / R) ──
+          echo ">>> Downloading AOSP Clang..."
+          wget --progress=dot:giga -O clang.tar.gz \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android-11.0.0_r48/clang-r383902.tar.gz" || \
+          wget --progress=dot:giga -O clang.tar.gz \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz"
+
+          # Verify it's a valid tar.gz (not an HTML error page)
+          if ! tar -tzf clang.tar.gz >/dev/null 2>&1; then
+            echo "ERROR: clang.tar.gz is not a valid archive. Download failed."
+            exit 1
+          fi
 
           mkdir clang && tar -xzf clang.tar.gz -C clang
+          echo ">>> Clang installed at: $(pwd)/clang"
+          ls clang/bin/clang || { echo "ERROR: clang binary missing!"; exit 1; }
 
-          # AOSP GCC 4.9
+          # ── AOSP GCC 4.9 from LineageOS mirrors (reliable in CI) ──
+          echo ">>> Cloning GCC aarch64 from LineageOS mirror..."
           git clone --depth=1 \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
             gcc64
+
+          echo ">>> Cloning GCC arm from LineageOS mirror..."
           git clone --depth=1 \
-            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
             gcc32
 
           echo "TOOLCHAIN_PATH=$HOME/toolchain" >> $GITHUB_ENV
 
       # ─────────────────────────────────────────────
-      # 7. Clone AnyKernel3
+      # 7. VERIFY toolchain binaries exist (CRITICAL FIX)
+      # ─────────────────────────────────────────────
+      - name: Verify toolchain binaries
+        run: |
+          echo "=== Verifying all required toolchain binaries ==="
+          
+          REQUIRED=(
+            "$TOOLCHAIN_PATH/clang/bin/clang"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-gcc"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-ld"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-ar"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-nm"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-objcopy"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-objdump"
+            "$TOOLCHAIN_PATH/gcc64/bin/aarch64-linux-android-strip"
+            "$TOOLCHAIN_PATH/gcc32/bin/arm-linux-androideabi-gcc"
+            "$TOOLCHAIN_PATH/gcc32/bin/arm-linux-androideabi-ld"
+          )
+
+          FAIL=0
+          for bin in "${REQUIRED[@]}"; do
+            if [ -f "$bin" ]; then
+              echo "✓ $(basename $bin)"
+            else
+              echo "✗ MISSING: $bin"
+              FAIL=1
+            fi
+          done
+
+          if [ $FAIL -eq 1 ]; then
+            echo ""
+            echo "=== Contents of gcc64/bin ==="
+            ls -la $TOOLCHAIN_PATH/gcc64/bin/ 2>/dev/null || echo "Directory missing!"
+            echo ""
+            echo "=== Contents of gcc32/bin ==="
+            ls -la $TOOLCHAIN_PATH/gcc32/bin/ 2>/dev/null || echo "Directory missing!"
+            exit 1
+          fi
+
+          echo ">>> All toolchain binaries verified."
+
+      # ─────────────────────────────────────────────
+      # 8. Clone AnyKernel3
       # ─────────────────────────────────────────────
       - name: Setup AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git $HOME/AnyKernel3
 
       # ─────────────────────────────────────────────
-      # 8. Configure kernel with NetHunter options
+      # 9. Configure kernel with NetHunter options
       # ─────────────────────────────────────────────
       - name: Configure kernel
         run: |
@@ -347,7 +395,7 @@ jobs:
           done
 
       # ─────────────────────────────────────────────
-      # 9. Build the kernel
+      # 10. Build the kernel
       # ─────────────────────────────────────────────
       - name: Build kernel
         run: |
@@ -355,7 +403,7 @@ jobs:
 
           export ARCH=arm64
           export SUBARCH=arm64
-          # GCC binutils FIRST in PATH so ld.bfd is found before ld.lld
+          # GCC binutils FIRST in PATH so GNU ld is found before ld.lld
           export PATH=$TOOLCHAIN_PATH/gcc64/bin:$TOOLCHAIN_PATH/gcc32/bin:$TOOLCHAIN_PATH/clang/bin:$PATH
 
           export CROSS_COMPILE=aarch64-linux-android-
@@ -368,11 +416,10 @@ jobs:
           export OBJDUMP=llvm-objdump
           export STRIP=llvm-strip
 
-          # ── CRITICAL: Force ld.bfd to prevent previous ld.lld bootloop ──
+          # ── CRITICAL: Use GNU ld (bfd) to prevent previous ld.lld bootloop ──
           if [ "${{ inputs.linker }}" == "ld.bfd" ]; then
-            export LD=aarch64-linux-android-ld.bfd
-            export LD_LIBRARY_PATH=$TOOLCHAIN_PATH/gcc64/lib:$LD_LIBRARY_PATH
-            echo ">>> Using ld.bfd (STABLE for phoenix)"
+            export LD=aarch64-linux-android-ld
+            echo ">>> Using GNU ld (bfd) — STABLE for phoenix"
           else
             export LD=ld.lld
             echo ">>> WARNING: Using ld.lld — known to cause bootloops on phoenix"
@@ -396,7 +443,7 @@ jobs:
           ls -la out/arch/arm64/boot/
 
       # ─────────────────────────────────────────────
-      # 10. Package into AnyKernel3 flashable zip
+      # 11. Package into AnyKernel3 flashable zip
       # ─────────────────────────────────────────────
       - name: Package AnyKernel3
         run: |
@@ -482,7 +529,7 @@ jobs:
           echo "ZIP_PATH=$HOME/AnyKernel3/$ZIP_NAME" >> $GITHUB_ENV
 
       # ─────────────────────────────────────────────
-      # 11. Upload artifacts
+      # 12. Upload artifacts
       # ─────────────────────────────────────────────
       - name: Upload kernel zip
         uses: actions/upload-artifact@v4
