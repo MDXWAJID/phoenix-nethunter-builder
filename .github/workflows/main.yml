@@ -43,7 +43,7 @@ jobs:
           sudo apt-get clean
 
       # ─────────────────────────────────────────────
-      # 2. Install build dependencies
+      # 2. Install build dependencies + GCC 10 cross-compilers
       # ─────────────────────────────────────────────
       - name: Install dependencies
         run: |
@@ -55,7 +55,9 @@ jobs:
             squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng bc \
             libstdc++6 libncurses5 wget python3 python3-pip gcc clang libssl-dev \
             rsync flex bison aria2 libelf-dev libncurses-dev libffi-dev libyaml-dev \
-            device-tree-compiler libcap-dev libc6:i386 libncurses5:i386 libstdc++6:i386
+            device-tree-compiler libcap-dev libc6:i386 libncurses5:i386 libstdc++6:i386 \
+            gcc-10-aarch64-linux-gnu gcc-10-arm-linux-gnueabihf \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
 
       # ─────────────────────────────────────────────
       # 3. Clone kernel source
@@ -68,9 +70,6 @@ jobs:
 
       # ─────────────────────────────────────────────
       # 4. CRITICAL: Patch source before build
-      #    - Fixes python2 -> python3 for dtbo.img
-      #    - Replaces ALL instances of cortex-a76 (mcpu AND mtune) for GCC 4.9
-      #    - Fixes vendor driver warnings
       # ─────────────────────────────────────────────
       - name: Pre-build source patches
         run: |
@@ -80,33 +79,19 @@ jobs:
           sed -i 's/python2/python3/g' arch/arm64/boot/Makefile
           echo "✓ Patched arch/arm64/boot/Makefile: python2 -> python3"
 
-          # FATAL FIX #2: GCC 4.9 does not support cortex-a76 in -mcpu OR -mtune.
-          # Find every Makefile/mk that references it and patch both variants.
-          for f in $(grep -rl 'cortex-a76' . --include='Makefile' --include='*.mk' 2>/dev/null); do
-            sed -i 's/-mcpu=cortex-a76\.cortex-a55/-mcpu=cortex-a57.cortex-a53/g' "$f"
-            sed -i 's/-mcpu=cortex-a76/-mcpu=cortex-a57/g' "$f"
-            sed -i 's/-mtune=cortex-a76\.cortex-a55/-mtune=cortex-a57.cortex-a53/g' "$f"
-            sed -i 's/-mtune=cortex-a76/-mtune=cortex-a57/g' "$f"
-            echo "✓ Patched $f"
-          done
-
           # Fix SECTOR_SIZE redefinition in dm-bow.c
           sed -i '/^#define SECTOR_SIZE 512$/d' drivers/md/dm-bow.c
-          echo "✓ Patched drivers/md/dm-bow.c: removed duplicate SECTOR_SIZE define"
 
           # Fix strlcpy destination size in sdio_cis.c
           sed -i 's|strlcpy(string, buf, strlen(buf) + 1);|strlcpy(string, buf, sizeof(string));|' drivers/mmc/core/sdio_cis.c
-          echo "✓ Patched drivers/mmc/core/sdio_cis.c: fixed strlcpy size"
 
           # Fix snprintf buffer overruns in nt36672c touchscreen driver
           sed -i 's|snprintf(mp_setting_criteria_csv_filename, PAGE_SIZE|snprintf(mp_setting_criteria_csv_filename, sizeof(mp_setting_criteria_csv_filename)|g' drivers/input/touchscreen/nt36672c/nt36xxx_mp_ctrlram.c
           sed -i 's|snprintf(mpcriteria, PAGE_SIZE|snprintf(mpcriteria, sizeof(mpcriteria)|g' drivers/input/touchscreen/nt36672c/nt36xxx_mp_ctrlram.c
-          echo "✓ Patched nt36xxx_mp_ctrlram.c: fixed snprintf buffer sizes"
 
           # Fix unused variables in zram_drv.c
           sed -i '/char mode_buf\[8\];/d' drivers/block/zram/zram_drv.c
           sed -i 's|ssize_t ret = len, sz;|ssize_t ret = len;|' drivers/block/zram/zram_drv.c
-          echo "✓ Patched zram_drv.c: removed unused variables"
 
       # ─────────────────────────────────────────────
       # 5. Validate defconfig exists
@@ -145,39 +130,39 @@ jobs:
           if __name__ == '__main__':
               sys.exit(main())
           PYEOF
-
           chmod +x scripts/gcc-wrapper.py
-          echo ">>> gcc-wrapper.py replaced with transparent pass-through"
-          cat scripts/gcc-wrapper.py
-          python3 -m py_compile scripts/gcc-wrapper.py && echo "✓ Syntax OK" || exit 1
+          python3 -m py_compile scripts/gcc-wrapper.py && echo "✓ gcc-wrapper.py OK" || exit 1
 
       # ─────────────────────────────────────────────
-      # 7. Download AOSP Clang + GCC binutils
+      # 7. Setup toolchain — GCC 10 cross-compiler
+      #    Symlink Ubuntu's gcc-10 as the Android-named toolchain
       # ─────────────────────────────────────────────
       - name: Setup toolchain
         run: |
-          mkdir -p $HOME/toolchain
-          cd $HOME/toolchain
+          mkdir -p $HOME/toolchain/gcc10/bin
+          cd $HOME/toolchain/gcc10/bin
 
-          # AOSP Clang 11.0.2
-          wget --progress=dot:giga -O clang.tar.gz \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android-11.0.0_r48/clang-r383902.tar.gz" || \
-          wget --progress=dot:giga -O clang.tar.gz \
-            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz"
+          # AArch64 — GCC 10 supports cortex-a76 natively
+          ln -sf /usr/bin/aarch64-linux-gnu-gcc-10 aarch64-linux-android-gcc
+          ln -sf /usr/bin/aarch64-linux-gnu-g++-10 aarch64-linux-android-g++
+          ln -sf /usr/bin/aarch64-linux-gnu-ld aarch64-linux-android-ld
+          ln -sf /usr/bin/aarch64-linux-gnu-ar aarch64-linux-android-ar
+          ln -sf /usr/bin/aarch64-linux-gnu-nm aarch64-linux-android-nm
+          ln -sf /usr/bin/aarch64-linux-gnu-objcopy aarch64-linux-android-objcopy
+          ln -sf /usr/bin/aarch64-linux-gnu-objdump aarch64-linux-android-objdump
+          ln -sf /usr/bin/aarch64-linux-gnu-strip aarch64-linux-android-strip
+          ln -sf /usr/bin/aarch64-linux-gnu-as aarch64-linux-android-as
 
-          if ! tar -tzf clang.tar.gz >/dev/null 2>&1; then
-            echo "ERROR: clang.tar.gz is corrupt"
-            exit 1
-          fi
-          mkdir clang && tar -xzf clang.tar.gz -C clang
-
-          # AOSP GCC 4.9 binutils (for ld, ar, nm, etc.)
-          git clone --depth=1 \
-            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git \
-            gcc64
-          git clone --depth=1 \
-            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git \
-            gcc32
+          # ARM32
+          ln -sf /usr/bin/arm-linux-gnueabihf-gcc-10 arm-linux-androideabi-gcc
+          ln -sf /usr/bin/arm-linux-gnueabihf-g++-10 arm-linux-androideabi-g++
+          ln -sf /usr/bin/arm-linux-gnueabihf-ld arm-linux-androideabi-ld
+          ln -sf /usr/bin/arm-linux-gnueabihf-ar arm-linux-androideabi-ar
+          ln -sf /usr/bin/arm-linux-gnueabihf-nm arm-linux-androideabi-nm
+          ln -sf /usr/bin/arm-linux-gnueabihf-objcopy arm-linux-androideabi-objcopy
+          ln -sf /usr/bin/arm-linux-gnueabihf-objdump arm-linux-androideabi-objdump
+          ln -sf /usr/bin/arm-linux-gnueabihf-strip arm-linux-androideabi-strip
+          ln -sf /usr/bin/arm-linux-gnueabihf-as arm-linux-androideabi-as
 
           echo "TOOLCHAIN_PATH=$HOME/toolchain" >> $GITHUB_ENV
 
@@ -186,12 +171,12 @@ jobs:
       # ─────────────────────────────────────────────
       - name: Verify toolchain
         run: |
-          export PATH=$TOOLCHAIN_PATH/gcc64/bin:$TOOLCHAIN_PATH/gcc32/bin:$TOOLCHAIN_PATH/clang/bin:$PATH
-          echo "=== GCC ==="
-          aarch64-linux-android-gcc --version || exit 1
-          echo "=== Cross LD ==="
-          aarch64-linux-android-ld --version || exit 1
-          echo "✓ Toolchain OK"
+          export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
+          echo "=== GCC Version ==="
+          aarch64-linux-android-gcc --version | head -n 1
+          echo "=== LD Version ==="
+          aarch64-linux-android-ld --version | head -n 1
+          aarch64-linux-android-gcc --version | grep -q "10." && echo "✓ GCC 10 confirmed" || exit 1
 
       # ─────────────────────────────────────────────
       # 9. Clone AnyKernel3
@@ -208,7 +193,7 @@ jobs:
           cd $KERNEL_PATH
           export ARCH=arm64
           export SUBARCH=arm64
-          export PATH=$TOOLCHAIN_PATH/gcc64/bin:$TOOLCHAIN_PATH/gcc32/bin:$TOOLCHAIN_PATH/clang/bin:$PATH
+          export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
 
           if [ "${{ inputs.build_type }}" == "clean" ]; then
             make O=out clean
@@ -395,7 +380,7 @@ jobs:
           done
 
       # ─────────────────────────────────────────────
-      # 11. Build the kernel (GCC 4.9)
+      # 11. Build the kernel
       # ─────────────────────────────────────────────
       - name: Build kernel
         run: |
@@ -403,9 +388,8 @@ jobs:
 
           export ARCH=arm64
           export SUBARCH=arm64
-          export PATH=$TOOLCHAIN_PATH/gcc64/bin:$TOOLCHAIN_PATH/gcc32/bin:$TOOLCHAIN_PATH/clang/bin:$PATH
+          export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
 
-          # Use GCC 4.9 — the compiler this vendor tree was written for
           export CC=aarch64-linux-android-gcc
           export CXX=aarch64-linux-android-g++
           export CROSS_COMPILE=aarch64-linux-android-
@@ -421,14 +405,13 @@ jobs:
           export KBUILD_BUILD_HOST=GitHub-Actions
 
           echo "=== Starting build ==="
-          echo "CC: $CC"
-          echo "CROSS_COMPILE: $CROSS_COMPILE"
-          aarch64-linux-android-gcc --version | head -n 1
+          echo "CC: $(which $CC)"
+          $CC --version | head -n 1
 
           make O=out ARCH=arm64 \
-            CC=aarch64-linux-android-gcc \
-            CROSS_COMPILE=aarch64-linux-android- \
-            CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+            CC=$CC \
+            CROSS_COMPILE=$CROSS_COMPILE \
+            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
             HOSTCFLAGS="-Wno-deprecated-declarations" \
             -j$(nproc --all) \
             2>&1 | tee build.log
