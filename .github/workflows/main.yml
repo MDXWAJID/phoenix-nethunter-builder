@@ -52,7 +52,7 @@ jobs:
             git ccache automake flex lzop bison gperf build-essential zip curl \
             zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 \
             squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng bc \
-            libstdc++6 libncurses5 wget python3 python3-pip gcc clang libssl-dev \
+            libstdc++6 libncurses5 wget python3 python3-pip python-is-python3 gcc clang libssl-dev perl \
             rsync flex bison aria2 libelf-dev libncurses-dev libffi-dev libyaml-dev \
             device-tree-compiler libcap-dev \
             gcc-10-aarch64-linux-gnu gcc-10-arm-linux-gnueabihf \
@@ -63,9 +63,10 @@ jobs:
       # ─────────────────────────────────────────────
       - name: Clone kernel source
         run: |
-          git clone --depth=1 -b ${{ inputs.kernel_branch }} ${{ inputs.kernel_repo }} kernel
+          git clone --depth=1 --single-branch -b "${{ inputs.kernel_branch }}" "${{ inputs.kernel_repo }}" kernel
           cd kernel
-          echo "KERNEL_PATH=$(pwd)" >> $GITHUB_ENV
+          echo "Kernel commit: $(git rev-parse --short HEAD)"
+          echo "KERNEL_PATH=$(pwd)" >> "$GITHUB_ENV"
 
       # ─────────────────────────────────────────────
       # 4. CRITICAL: Patch source before build
@@ -74,9 +75,12 @@ jobs:
         run: |
           cd $KERNEL_PATH
 
-          # FATAL FIX #1: dtbo.img generation hardcodes python2. Redirect to python3.
-          sed -i 's/python2/python3/g' arch/arm64/boot/Makefile
-          echo "✓ Patched arch/arm64/boot/Makefile: python2 -> python3"
+          # Kernel 4.14 build scripts invoke `python`.
+          # Ubuntu 22.04 provides Python 3, so `python-is-python3`
+          # makes the expected interpreter available without modifying
+          # kernel source files.
+          python --version
+          python3 --version
 
           # Fix SECTOR_SIZE redefinition in dm-bow.c
           sed -i '/^#define SECTOR_SIZE 512$/d' drivers/md/dm-bow.c
@@ -106,34 +110,7 @@ jobs:
           echo "✓ defconfig FOUND"
 
       # ─────────────────────────────────────────────
-      # 6. Setup gcc-wrapper.py (transparent pass-through)
-      # ─────────────────────────────────────────────
-      - name: Setup gcc-wrapper.py
-        run: |
-          cd $KERNEL_PATH
-          cat > scripts/gcc-wrapper.py << 'PYEOF'
-          #!/usr/bin/env python3
-          import sys
-          import subprocess
-
-          def main():
-              args = sys.argv[1:]
-              if not args:
-                  return 1
-              proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-              stdout, stderr = proc.communicate()
-              sys.stdout.buffer.write(stdout)
-              sys.stderr.buffer.write(stderr)
-              return proc.returncode
-
-          if __name__ == '__main__':
-              sys.exit(main())
-          PYEOF
-          chmod +x scripts/gcc-wrapper.py
-          python3 -m py_compile scripts/gcc-wrapper.py && echo "✓ gcc-wrapper.py OK" || exit 1
-
-      # ─────────────────────────────────────────────
-      # 7. Setup toolchain — GCC 10 cross-compiler
+      # 6. Setup toolchain — GCC 10 cross-compiler
       #    Symlink Ubuntu's gcc-10 as the Android-named toolchain
       # ─────────────────────────────────────────────
       - name: Setup toolchain
@@ -166,7 +143,7 @@ jobs:
           echo "TOOLCHAIN_PATH=$HOME/toolchain" >> $GITHUB_ENV
 
       # ─────────────────────────────────────────────
-      # 8. VERIFY toolchain
+      # 7. VERIFY toolchain
       # ─────────────────────────────────────────────
       - name: Verify toolchain
         run: |
@@ -178,14 +155,14 @@ jobs:
           aarch64-linux-android-gcc --version | grep -q "10." && echo "✓ GCC 10 confirmed" || exit 1
 
       # ─────────────────────────────────────────────
-      # 9. Clone AnyKernel3
+      # 8. Clone AnyKernel3
       # ─────────────────────────────────────────────
       - name: Setup AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git $HOME/AnyKernel3
 
       # ─────────────────────────────────────────────
-      # 10. Configure kernel with NetHunter options
+      # 9. Configure kernel with NetHunter options
       # ─────────────────────────────────────────────
       - name: Configure kernel
         run: |
@@ -201,9 +178,9 @@ jobs:
 
           make O=out ARCH=arm64 ${{ inputs.defconfig }}
 
+          # ── NetHunter configuration fragment ──
+          cat > /tmp/nethunter.fragment <<'EOF'
           # ── NetHunter Config Fragment ──
-          cat << 'EOF' >> out/.config
-
           # === Core Module Support ===
           CONFIG_MODULES=y
           CONFIG_MODULE_UNLOAD=y
@@ -211,7 +188,6 @@ jobs:
           CONFIG_MODULE_SRCVERSION_ALL=y
           CONFIG_KALLSYMS=y
           CONFIG_KALLSYMS_ALL=y
-
           # === Netfilter / iptables ===
           CONFIG_NETFILTER_XT_TARGET_LOG=y
           CONFIG_NETFILTER_XT_MATCH_MAC=y
@@ -224,7 +200,6 @@ jobs:
           CONFIG_NETFILTER_XT_MATCH_TIME=y
           CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
           CONFIG_NETFILTER_XT_MATCH_HASHLIMIT=y
-
           # === Wireless Stack ===
           CONFIG_MAC80211=y
           CONFIG_CFG80211=y
@@ -234,7 +209,6 @@ jobs:
           CONFIG_CFG80211_CERTIFICATION_ONUS=y
           CONFIG_CFG80211_CRDA_SUPPORT=y
           CONFIG_CFG80211_WEXT=y
-
           # === USB Networking ===
           CONFIG_USB_USBNET=m
           CONFIG_USB_NET_CDCETHER=m
@@ -243,20 +217,17 @@ jobs:
           CONFIG_USB_NET_HUAWEI_CDC_NCM=m
           CONFIG_USB_NET_CDC_MBIM=m
           CONFIG_USB_WDM=m
-
           # === USB Serial (3G/LTE modems) ===
           CONFIG_USB_SERIAL=m
           CONFIG_USB_SERIAL_OPTION=m
           CONFIG_USB_SERIAL_QUALCOMM=m
           CONFIG_USB_SERIAL_WWAN=m
           CONFIG_USB_SERIAL_SIERRAWIRELESS=m
-
           # === Bluetooth USB ===
           CONFIG_BT_HCIBTUSB=m
           CONFIG_BT_HCIBTUSB_BCM=y
           CONFIG_BT_HCIBTUSB_RTL=y
           CONFIG_BT_HCIBTSDIO=m
-
           # === USB WiFi — Atheros ===
           CONFIG_ATH_CARDS=m
           CONFIG_ATH9K=m
@@ -267,7 +238,6 @@ jobs:
           CONFIG_ATH9K_PCOEM=y
           CONFIG_ATH9K_HWRNG=y
           CONFIG_ATH9K_HTC=m
-
           # === USB WiFi — Realtek ===
           CONFIG_RTL_CARDS=m
           CONFIG_RTLWIFI=m
@@ -276,7 +246,6 @@ jobs:
           CONFIG_RTL8187=m
           CONFIG_RTL8192CU=m
           CONFIG_RTL8XXXU=m
-
           # === USB WiFi — Ralink/Mediatek ===
           CONFIG_RT2X00=m
           CONFIG_RT2X00_LIB=m
@@ -289,7 +258,6 @@ jobs:
           CONFIG_RT73USB=m
           CONFIG_RT2500USB=m
           CONFIG_CARL9170=m
-
           # === USB Gadget / HID ===
           CONFIG_USB_HIDDEV=y
           CONFIG_USB_GADGET=y
@@ -306,17 +274,14 @@ jobs:
           CONFIG_USB_CONFIGFS_F_MIDI=y
           CONFIG_USB_CONFIGFS_F_AUDIO_SRC=y
           CONFIG_USB_CONFIGFS_UEVENT=y
-
           # === RFKILL ===
           CONFIG_RFKILL=y
           CONFIG_RFKILL_INPUT=y
           CONFIG_RFKILL_LEDS=y
           CONFIG_RFKILL_GPIO=y
-
           # === LEDs ===
           CONFIG_LEDS_CLASS=y
           CONFIG_LEDS_TRIGGERS=y
-
           # === Diagnostics ===
           CONFIG_PACKET_DIAG=y
           CONFIG_UNIX_DIAG=y
@@ -324,11 +289,9 @@ jobs:
           CONFIG_INET_TCP_DIAG=y
           CONFIG_INET_UDP_DIAG=y
           CONFIG_NETLINK_DIAG=y
-
           # === TUN/TAP ===
           CONFIG_TUN=y
           CONFIG_TAP=y
-
           # === Traffic Control ===
           CONFIG_NET_SCHED=y
           CONFIG_NET_CLS_U32=y
@@ -338,7 +301,6 @@ jobs:
           CONFIG_NET_SCH_HFSC=y
           CONFIG_NET_SCH_INGRESS=y
           CONFIG_NET_SCH_NETEM=y
-
           # === USB Mass Storage ===
           CONFIG_USB_STORAGE=y
           CONFIG_USB_STORAGE_DATAFAB=y
@@ -353,12 +315,10 @@ jobs:
           CONFIG_USB_STORAGE_KARMA=y
           CONFIG_USB_STORAGE_CYPRESS_ATACB=y
           CONFIG_USB_STORAGE_ENE_UB6250=y
-
           # === USB Audio / Video ===
           CONFIG_SND_USB_AUDIO=m
           CONFIG_MEDIA_USB_SUPPORT=y
           CONFIG_USB_VIDEO_CLASS=m
-
           # === Input / Misc ===
           CONFIG_INPUT_UINPUT=y
           CONFIG_BT_RFCOMM=m
@@ -367,19 +327,30 @@ jobs:
           CONFIG_BT_6LOWPAN=m
           EOF
 
-          sed -i "s/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"${{ inputs.localversion }}\"/" out/.config
-          sed -i 's/CONFIG_LOCALVERSION_AUTO=.*/# CONFIG_LOCALVERSION_AUTO is not set/' out/.config
-          echo "# CONFIG_LOCALVERSION_AUTO is not set" >> out/.config
+          # merge_config.sh removes duplicate symbols and then lets Kconfig
+          # resolve dependencies instead of blindly appending duplicate keys.
+          chmod +x scripts/kconfig/merge_config.sh
+          scripts/kconfig/merge_config.sh -m -O out out/.config /tmp/nethunter.fragment
+          make O=out ARCH=arm64 olddefconfig
 
+          # Set LOCALVERSION using the kernel's supported config helper.
+          chmod +x scripts/config
+          scripts/config --file out/.config --set-str LOCALVERSION "${{ inputs.localversion }}"
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
           make O=out ARCH=arm64 olddefconfig
 
           echo "=== Config Verification ==="
           for opt in CONFIG_MODULES CONFIG_USB_GADGET CONFIG_MAC80211 CONFIG_ATH9K_HTC CONFIG_CFG80211; do
-            grep -q "^$opt=[ym]" out/.config && echo "✓ $opt" || echo "✗ $opt MISSING"
+            if grep -q "^$opt=[ym]" out/.config; then
+              echo "✓ $opt"
+            else
+              echo "✗ $opt MISSING"
+              exit 1
+            fi
           done
 
       # ─────────────────────────────────────────────
-      # 11. Build the kernel
+      # 10. Build the kernel
       # ─────────────────────────────────────────────
       - name: Build kernel
         run: |
@@ -389,26 +360,19 @@ jobs:
           export SUBARCH=arm64
           export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
 
-          export CC=aarch64-linux-android-gcc
-          export CXX=aarch64-linux-android-g++
+          export PYTHON=python3
           export CROSS_COMPILE=aarch64-linux-android-
           export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-          export LD=aarch64-linux-android-ld
-          export AR=aarch64-linux-android-ar
-          export NM=aarch64-linux-android-nm
-          export OBJCOPY=aarch64-linux-android-objcopy
-          export OBJDUMP=aarch64-linux-android-objdump
-          export STRIP=aarch64-linux-android-strip
-
           export KBUILD_BUILD_USER=NetHunter
           export KBUILD_BUILD_HOST=GitHub-Actions
 
           echo "=== Starting build ==="
-          echo "CC: $(which $CC)"
-          $CC --version | head -n 1
+          echo "Python: $(python3 --version)"
+          echo "Cross compiler: $(which aarch64-linux-android-gcc)"
+          aarch64-linux-android-gcc --version | head -n 1
 
           make O=out ARCH=arm64 \
-            CC=$CC \
+            PYTHON=$PYTHON \
             CROSS_COMPILE=$CROSS_COMPILE \
             CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
             HOSTCFLAGS="-Wno-deprecated-declarations" \
@@ -419,7 +383,7 @@ jobs:
           ls -la out/arch/arm64/boot/ || echo "No boot output directory!"
 
       # ─────────────────────────────────────────────
-      # 12. Package into AnyKernel3 flashable zip
+      # 11. Package into AnyKernel3 flashable zip
       # ─────────────────────────────────────────────
       - name: Package AnyKernel3
         if: success()
@@ -449,12 +413,14 @@ jobs:
           fi
 
           mkdir -p modules
-          find $KERNEL_PATH/out -name "*.ko" -exec cp {} modules/ \;
-          echo "Collected $(ls modules/*.ko 2>/dev/null | wc -l) modules"
+          find "$KERNEL_PATH/out" -name "*.ko" -exec cp {} modules/ \;
+          module_count=$(find modules -maxdepth 1 -name '*.ko' -type f | wc -l)
+          echo "Collected $module_count modules"
 
-          for mod in modules/*.ko; do
-            aarch64-linux-android-strip --strip-unneeded "$mod" 2>/dev/null || true
-          done
+          if [ "$module_count" -gt 0 ]; then
+            find modules -maxdepth 1 -name '*.ko' -type f -print0 |
+              xargs -0 -r aarch64-linux-android-strip --strip-unneeded
+          fi
 
           cat > anykernel.sh << 'EOF'
           ### AnyKernel setup
@@ -462,7 +428,7 @@ jobs:
           kernel.string=NetHunter Kernel for Poco X2 (MIUI 12.5.6 / Android 11)
           do.devicecheck=1
           do.modules=1
-          do.systemless=1
+          do.systemless=0
           do.cleanup=1
           do.cleanuponabort=0
           device.name1=phoenix
@@ -472,13 +438,18 @@ jobs:
           '; }
 
           block=/dev/block/bootdevice/by-name/boot;
-          is_slot_device=0;
+          is_slot_device=auto;
           ramdisk_compression=auto;
           patch_vbmeta_flag=auto;
 
           . tools/ak3-core.sh;
 
           dump_boot;
+
+          if [ -f dtbo.img ]; then
+            flash_dtbo;
+          fi
+
           write_boot;
           EOF
 
@@ -489,7 +460,7 @@ jobs:
           echo "ZIP_PATH=$HOME/AnyKernel3/$ZIP_NAME" >> $GITHUB_ENV
 
       # ─────────────────────────────────────────────
-      # 13. Upload artifacts
+      # 12. Upload artifacts
       # ─────────────────────────────────────────────
       - name: Upload kernel zip
         if: success()
