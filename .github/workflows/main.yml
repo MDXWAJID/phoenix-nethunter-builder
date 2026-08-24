@@ -1,383 +1,478 @@
-name: Build Poco X2 NetHunter Kernel
+name: NetHunter Kernel — Poco X2 (MIUI 12.5.6 / Android 11)
 
 on:
   workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: 'Kernel source repository'
+        required: true
+        default: 'https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git'
+      kernel_branch:
+        description: 'Kernel branch (phoenix-q-oss for MIUI 12.5 A11 stock)'
+        required: true
+        default: 'phoenix-q-oss'
+      defconfig:
+        description: 'Defconfig name'
+        required: true
+        default: 'phoenix_defconfig'
+      localversion:
+        description: 'Kernel LOCALVERSION suffix'
+        required: true
+        default: '-perf-NetHunter-v1'
+      linker:
+        description: 'Linker (ld.bfd is MANDATORY for phoenix stability)'
+        type: choice
+        options:
+          - ld.bfd
+          - ld.lld
+        default: 'ld.bfd'
+      build_type:
+        description: 'Build type'
+        type: choice
+        options:
+          - clean
+          - incremental
+        default: 'clean'
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Install Build Dependencies
+      # ─────────────────────────────────────────────
+      # 1. Free disk space (kernel builds are massive)
+      # ─────────────────────────────────────────────
+      - name: Maximize build space
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex git \
-            gnupg gperf libelf-dev liblz4-tool libncurses5-dev libssl-dev libxml2 \
-            libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc \
-            zip zlib1g-dev python3 wget ca-certificates
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -a -f
+          sudo apt-get clean
 
-      - name: Fix python2 for legacy kernel build
+      # ─────────────────────────────────────────────
+      # 2. Install build dependencies
+      # ─────────────────────────────────────────────
+      - name: Install dependencies
         run: |
-          # The kernel build calls "python2" explicitly for dtbo generation
-          sudo ln -sf /usr/bin/python3 /usr/bin/python2
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git ccache automake flex lzop bison gperf build-essential zip curl \
+            zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libbz2-1.0 \
+            squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng bc \
+            libstdc++6 libncurses5 wget python3 python3-pip gcc clang libssl-dev \
+            rsync flex bison aria2 libelf-dev libncurses-dev libffi-dev libyaml-dev \
+            device-tree-compiler libcap-dev
 
-      - name: Clone Kernel Source and AnyKernel3
+      # ─────────────────────────────────────────────
+      # 3. Setup ccache
+      # ─────────────────────────────────────────────
+      - name: Setup ccache
         run: |
-          git clone https://github.com/PixelExperience-Devices/kernel_xiaomi_phoenix.git -b twelve kernel --depth=1
-          git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          mkdir -p ~/.ccache
+          echo "max_size = 5G" > ~/.ccache/ccache.conf
+          echo "compression = true" >> ~/.ccache/ccache.conf
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
 
-      - name: Fetch Proton Clang Toolchain
+      # ─────────────────────────────────────────────
+      # 4. Clone kernel source
+      # ─────────────────────────────────────────────
+      - name: Clone kernel source
         run: |
-          git clone https://github.com/kdrag0n/proton-clang.git --depth=1 clang
+          git clone --depth=1 -b ${{ inputs.kernel_branch }} ${{ inputs.kernel_repo }} kernel
+          cd kernel
+          echo "KERNEL_PATH=$(pwd)" >> $GITHUB_ENV
 
-      - name: Patch Python 3 compatibility for DTC scripts
+      # ─────────────────────────────────────────────
+      # 5. Download AOSP Clang + GCC toolchain
+      # ─────────────────────────────────────────────
+      - name: Setup toolchain
         run: |
-          set -e
-          # The PE twelve tree still carries Python 2 syntax in its DTC helper scripts.
-          # Ubuntu 22.04 runs Python 3, so we patch all known Py2-isms before compilation.
-          find kernel/scripts -name "*.py" -print0 | while IFS= read -r -d '' f; do
-            sed -i 's/xrange/range/g' "$f"
-            sed -i 's/if version is 0:/if version == 0:/g' "$f"
-            sed -i 's/if version is not 0:/if version != 0:/g' "$f"
+          mkdir -p $HOME/toolchain
+          cd $HOME/toolchain
+
+          # AOSP Clang 11.0.2 (Android 11 / R — matches your firmware)
+          wget -q \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/android-11.0.0_r48/clang-r383902.tar.gz" \
+            -O clang.tar.gz || \
+          wget -q \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r383902.tar.gz" \
+            -O clang.tar.gz
+
+          mkdir clang && tar -xzf clang.tar.gz -C clang
+
+          # AOSP GCC 4.9 (provides ld.bfd and binutils)
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+            gcc64
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9 \
+            gcc32
+
+          echo "TOOLCHAIN_PATH=$HOME/toolchain" >> $GITHUB_ENV
+
+      # ─────────────────────────────────────────────
+      # 6. Clone AnyKernel3
+      # ─────────────────────────────────────────────
+      - name: Setup AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git $HOME/AnyKernel3
+
+      # ─────────────────────────────────────────────
+      # 7. Configure kernel with NetHunter options
+      # ─────────────────────────────────────────────
+      - name: Configure kernel
+        run: |
+          cd $KERNEL_PATH
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH=$TOOLCHAIN_PATH/gcc64/bin:$TOOLCHAIN_PATH/gcc32/bin:$TOOLCHAIN_PATH/clang/bin:$PATH
+
+          # Clean build if requested
+          if [ "${{ inputs.build_type }}" == "clean" ]; then
+            make O=out clean
+            make O=out mrproper
+          fi
+
+          # Generate base defconfig
+          make O=out ARCH=arm64 ${{ inputs.defconfig }}
+
+          # ── NetHunter Config Fragment ──
+          # Injected in dependency order, then olddefconfig resolves symbols
+          cat << 'EOF' >> out/.config
+
+          # === Core Module Support ===
+          CONFIG_MODULES=y
+          CONFIG_MODULE_UNLOAD=y
+          CONFIG_MODVERSIONS=y
+          CONFIG_MODULE_SRCVERSION_ALL=y
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+
+          # === Netfilter / iptables ===
+          CONFIG_NETFILTER_XT_TARGET_LOG=y
+          CONFIG_NETFILTER_XT_MATCH_MAC=y
+          CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y
+          CONFIG_NETFILTER_XT_MATCH_OWNER=y
+          CONFIG_NETFILTER_XT_MATCH_STATE=y
+          CONFIG_NETFILTER_XT_MATCH_LIMIT=y
+          CONFIG_NETFILTER_XT_MATCH_COMMENT=y
+          CONFIG_NETFILTER_XT_MATCH_STRING=y
+          CONFIG_NETFILTER_XT_MATCH_TIME=y
+          CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
+          CONFIG_NETFILTER_XT_MATCH_HASHLIMIT=y
+
+          # === Wireless Stack ===
+          CONFIG_MAC80211=y
+          CONFIG_CFG80211=y
+          CONFIG_NL80211_TESTMODE=y
+          CONFIG_MAC80211_MESH=y
+          CONFIG_MAC80211_LEDS=y
+          CONFIG_CFG80211_CERTIFICATION_ONUS=y
+          CONFIG_CFG80211_CRDA_SUPPORT=y
+          CONFIG_CFG80211_WEXT=y
+
+          # === USB Networking ===
+          CONFIG_USB_USBNET=m
+          CONFIG_USB_NET_CDCETHER=m
+          CONFIG_USB_NET_RNDIS_HOST=m
+          CONFIG_USB_NET_CDC_NCM=m
+          CONFIG_USB_NET_HUAWEI_CDC_NCM=m
+          CONFIG_USB_NET_CDC_MBIM=m
+          CONFIG_USB_WDM=m
+
+          # === USB Serial (3G/LTE modems) ===
+          CONFIG_USB_SERIAL=m
+          CONFIG_USB_SERIAL_OPTION=m
+          CONFIG_USB_SERIAL_QUALCOMM=m
+          CONFIG_USB_SERIAL_WWAN=m
+          CONFIG_USB_SERIAL_SIERRAWIRELESS=m
+
+          # === Bluetooth USB ===
+          CONFIG_BT_HCIBTUSB=m
+          CONFIG_BT_HCIBTUSB_BCM=y
+          CONFIG_BT_HCIBTUSB_RTL=y
+          CONFIG_BT_HCIBTSDIO=m
+
+          # === USB WiFi — Atheros ===
+          CONFIG_ATH_CARDS=m
+          CONFIG_ATH9K=m
+          CONFIG_ATH9K_COMMON=m
+          CONFIG_ATH9K_HW=m
+          CONFIG_ATH9K_BTCOEX_SUPPORT=y
+          CONFIG_ATH9K_RFKILL=y
+          CONFIG_ATH9K_PCOEM=y
+          CONFIG_ATH9K_HWRNG=y
+          CONFIG_ATH9K_HTC=m
+
+          # === USB WiFi — Realtek ===
+          CONFIG_RTL_CARDS=m
+          CONFIG_RTLWIFI=m
+          CONFIG_RTLWIFI_USB=m
+          CONFIG_RTL8192C_COMMON=m
+          CONFIG_RTL8187=m
+          CONFIG_RTL8192CU=m
+          CONFIG_RTL8XXXU=m
+
+          # === USB WiFi — Ralink/Mediatek ===
+          CONFIG_RT2X00=m
+          CONFIG_RT2X00_LIB=m
+          CONFIG_RT2X00_LIB_USB=m
+          CONFIG_RT2X00_LIB_FIRMWARE=m
+          CONFIG_RT2800_LIB=m
+          CONFIG_RT2800_LIB_MMIO=m
+          CONFIG_RT2800_LIB_USB=m
+          CONFIG_RT2800USB=m
+          CONFIG_RT73USB=m
+          CONFIG_RT2500USB=m
+          CONFIG_CARL9170=m
+
+          # === USB Gadget / HID (NetHunter USB arsenal) ===
+          CONFIG_USB_HIDDEV=y
+          CONFIG_USB_GADGET=y
+          CONFIG_USB_CONFIGFS=y
+          CONFIG_USB_CONFIGFS_F_HID=y
+          CONFIG_USB_CONFIGFS_F_MASS_STORAGE=y
+          CONFIG_USB_CONFIGFS_F_RNDIS=y
+          CONFIG_USB_CONFIGFS_F_ACM=y
+          CONFIG_USB_CONFIGFS_F_ECM=y
+          CONFIG_USB_CONFIGFS_F_EEM=y
+          CONFIG_USB_CONFIGFS_F_SUBSET=y
+          CONFIG_USB_CONFIGFS_F_FS=y
+          CONFIG_USB_CONFIGFS_F_UVC=y
+          CONFIG_USB_CONFIGFS_F_MIDI=y
+          CONFIG_USB_CONFIGFS_F_AUDIO_SRC=y
+          CONFIG_USB_CONFIGFS_UEVENT=y
+
+          # === RFKILL ===
+          CONFIG_RFKILL=y
+          CONFIG_RFKILL_INPUT=y
+          CONFIG_RFKILL_LEDS=y
+          CONFIG_RFKILL_GPIO=y
+
+          # === LEDs ===
+          CONFIG_LEDS_CLASS=y
+          CONFIG_LEDS_TRIGGERS=y
+
+          # === Diagnostics ===
+          CONFIG_PACKET_DIAG=y
+          CONFIG_UNIX_DIAG=y
+          CONFIG_INET_DIAG=y
+          CONFIG_INET_TCP_DIAG=y
+          CONFIG_INET_UDP_DIAG=y
+          CONFIG_NETLINK_DIAG=y
+
+          # === TUN/TAP ===
+          CONFIG_TUN=y
+          CONFIG_TAP=y
+
+          # === Traffic Control ===
+          CONFIG_NET_SCHED=y
+          CONFIG_NET_CLS_U32=y
+          CONFIG_NET_EMATCH=y
+          CONFIG_NET_CLS_ACT=y
+          CONFIG_NET_SCH_HTB=y
+          CONFIG_NET_SCH_HFSC=y
+          CONFIG_NET_SCH_INGRESS=y
+          CONFIG_NET_SCH_NETEM=y
+
+          # === USB Mass Storage ===
+          CONFIG_USB_STORAGE=y
+          CONFIG_USB_STORAGE_DATAFAB=y
+          CONFIG_USB_STORAGE_FREECOM=y
+          CONFIG_USB_STORAGE_ISD200=y
+          CONFIG_USB_STORAGE_USBAT=y
+          CONFIG_USB_STORAGE_SDDR09=y
+          CONFIG_USB_STORAGE_SDDR55=y
+          CONFIG_USB_STORAGE_JUMPSHOT=y
+          CONFIG_USB_STORAGE_ALAUDA=y
+          CONFIG_USB_STORAGE_ONETOUCH=y
+          CONFIG_USB_STORAGE_KARMA=y
+          CONFIG_USB_STORAGE_CYPRESS_ATACB=y
+          CONFIG_USB_STORAGE_ENE_UB6250=y
+
+          # === USB Audio / Video ===
+          CONFIG_SND_USB_AUDIO=m
+          CONFIG_MEDIA_USB_SUPPORT=y
+          CONFIG_USB_VIDEO_CLASS=m
+
+          # === Input / Misc ===
+          CONFIG_INPUT_UINPUT=y
+          CONFIG_BT_RFCOMM=m
+          CONFIG_BT_BNEP=m
+          CONFIG_BT_HIDP=m
+          CONFIG_BT_6LOWPAN=m
+          EOF
+
+          # Inject LOCALVERSION (controls vermagic string)
+          sed -i "s/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"${{ inputs.localversion }}\"/" out/.config
+
+          # Disable LOCALVERSION_AUTO so git hash doesn't append unpredictably
+          sed -i 's/CONFIG_LOCALVERSION_AUTO=.*/# CONFIG_LOCALVERSION_AUTO is not set/' out/.config
+          echo "# CONFIG_LOCALVERSION_AUTO is not set" >> out/.config
+
+          # Resolve all dependencies and validate
+          make O=out ARCH=arm64 olddefconfig
+
+          # Verify critical options are enabled
+          echo "=== Config Verification ==="
+          for opt in CONFIG_MODULES CONFIG_USB_GADGET CONFIG_MAC80211 CONFIG_ATH9K_HTC CONFIG_CFG80211; do
+            if grep -q "^$opt=[ym]" out/.config; then
+              echo "✓ $opt enabled"
+            else
+              echo "✗ $opt MISSING — build may fail"
+            fi
           done
 
-          # FIX: mkdtboimg.py initializes dt_entry_buf as a str ("") but later
-          # concatenates bytes (compressed_entry) onto it, causing:
-          # TypeError: can only concatenate str (not "bytes") to str
-          # Force it to start as a bytes object instead.
-          sed -i 's/dt_entry_buf = ""/dt_entry_buf = b""/' kernel/scripts/dtc/libfdt/mkdtboimg.py
-
-          # FIX: _update_metadata() builds the header buffer using
-          # array('c', ' ' * size) — the 'c' typecode (byte string) was
-          # removed from Python's array module in Python 3, causing:
-          # TypeError: cannot use a str to initialize an array with typecode 'c'
-          # A bytearray behaves the same way for struct.pack_into() and
-          # file.write(), so swap it in directly.
-          sed -i "s/self.__metadata = array('c', ' ' \* self.__metadata_size)/self.__metadata = bytearray(self.__metadata_size)/" kernel/scripts/dtc/libfdt/mkdtboimg.py
-
-          # Verify the known fatal file is clean
-          if grep -q 'xrange' kernel/scripts/dtc/libfdt/mkdtboimg.py; then
-            echo "ERROR: Failed to patch xrange in mkdtboimg.py"
-            exit 1
-          fi
-          if grep -q 'dt_entry_buf = ""' kernel/scripts/dtc/libfdt/mkdtboimg.py; then
-            echo "ERROR: Failed to patch dt_entry_buf bytes fix in mkdtboimg.py"
-            exit 1
-          fi
-          if grep -q "array('c'" kernel/scripts/dtc/libfdt/mkdtboimg.py; then
-            echo "ERROR: Failed to patch array('c', ...) bytearray fix in mkdtboimg.py"
-            exit 1
-          fi
-          echo "Python DTC scripts patched for Python 3"
-
-      - name: Apply ath9k HTC symbol rename fix
+      # ─────────────────────────────────────────────
+      # 8. Build the kernel
+      # ─────────────────────────────────────────────
+      - name: Build kernel
         run: |
-          set -e
-          cd kernel
-          HTC_H="drivers/net/wireless/ath/ath9k/htc.h"
-          if [ ! -f "$HTC_H" ]; then
-            echo "ERROR: htc.h not found"
-            exit 1
-          fi
-          if grep -q "ath9k_htc_stop" "$HTC_H"; then
-            echo "Rename patch already present"
+          cd $KERNEL_PATH
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          # GCC binutils FIRST in PATH so ld.bfd is found before ld.lld
+          export PATH=$TOOLCHAIN_PATH/gcc64/bin:$TOOLCHAIN_PATH/gcc32/bin:$TOOLCHAIN_PATH/clang/bin:$PATH
+
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_COMPAT=arm-linux-androideabi-
+          export CC="ccache clang"
+          export CXX="ccache clang++"
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+
+          # ── CRITICAL: Force ld.bfd to prevent previous ld.lld bootloop ──
+          if [ "${{ inputs.linker }}" == "ld.bfd" ]; then
+            export LD=aarch64-linux-android-ld.bfd
+            export LD_LIBRARY_PATH=$TOOLCHAIN_PATH/gcc64/lib:$LD_LIBRARY_PATH
+            echo ">>> Using ld.bfd (STABLE for phoenix)"
           else
-            cat > /tmp/ath9k_htc_rename.h << 'EOF'
-          /* NetHunter: avoid multiple definition with qca-wifi-host-cmn HTC */
-          #define htc_stop                     ath9k_htc_stop
-          #define htc_start                    ath9k_htc_start
-          #define htc_init                     ath9k_htc_init
-          #define htc_cleanup                  ath9k_htc_cleanup
-          #define htc_connect_service          ath9k_htc_connect_service
-          #define htc_connect_service_complete ath9k_htc_connect_service_complete
-          #define htc_send                     ath9k_htc_send
-          #define htc_send_epid                ath9k_htc_send_epid
-          #define htc_tx_completion            ath9k_htc_tx_completion
-          #define htc_rx_completion            ath9k_htc_rx_completion
-          #define htc_credit_distribution      ath9k_htc_credit_distribution
-          #define htc_setup_credit             ath9k_htc_setup_credit
-          EOF
-            awk '1; /#define HTC_H/{system("cat /tmp/ath9k_htc_rename.h")}' "$HTC_H" > /tmp/htc_h_new
-            mv /tmp/htc_h_new "$HTC_H"
-            echo "Patched $HTC_H"
+            export LD=ld.lld
+            echo ">>> WARNING: Using ld.lld — known to cause bootloops on phoenix"
           fi
-          head -n 40 "$HTC_H"
 
-      - name: Fix ufshcd duplicate symbol linker error
-        run: |
-          set -e
-          cd kernel
-          UFS_MK="drivers/scsi/ufs/Makefile"
-          if [ ! -f "$UFS_MK" ]; then
-            echo "ERROR: $UFS_MK not found"
-            exit 1
-          fi
-          # This tree's Makefile builds ufshcd.c twice: once wrapped into
-          # ufshcd-core.o (via "ufshcd-core-y := ufshcd.o"), and again as a
-          # standalone "ufshcd.o" object. Both end up built-in, so ld.lld
-          # fails with "duplicate symbol" for every function in ufshcd.c.
-          # Fix: drop the redundant standalone line, keep the composite one.
-          if grep -qE '^obj-\$\(CONFIG_SCSI_UFSHCD\) \+= ufshcd\.o$' "$UFS_MK"; then
-            sed -i '/^obj-\$(CONFIG_SCSI_UFSHCD) += ufshcd\.o$/d' "$UFS_MK"
-            echo "Removed duplicate 'ufshcd.o' obj-y line from $UFS_MK"
-          else
-            echo "Duplicate line not found (already patched or upstream changed) - skipping"
-          fi
-          cat "$UFS_MK"
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export KBUILD_BUILD_USER=NetHunter
+          export KBUILD_BUILD_HOST=GitHub-Actions
+          export KBUILD_COMPILER_STRING="$($TOOLCHAIN_PATH/clang/bin/clang --version | head -n 1)"
 
-      - name: Configure Kernel
-        run: |
-          set -e
-          cd kernel
-          export PATH="$(pwd)/../clang/bin:$PATH"
-
-          # PE twelve places the defconfig under vendor/
-          DEFCONFIG="vendor/phoenix_defconfig"
-          echo "Target defconfig: $DEFCONFIG"
-
-          make O=out ARCH=arm64 "$DEFCONFIG"
-
-          # Enable NetHunter-specific options
-          ./scripts/config --file out/.config \
-            -e CONFIG_IKCONFIG \
-            -e CONFIG_IKCONFIG_PROC \
-            -e CONFIG_KPROBES \
-            -e CONFIG_HAVE_KPROBES \
-            -e CONFIG_BPF \
-            -e CONFIG_BPF_SYSCALL \
-            -e CONFIG_BPF_JIT \
-            -e CONFIG_CFG80211 \
-            -e CONFIG_CFG80211_WEXT \
-            -e CONFIG_MAC80211 \
-            -e CONFIG_MAC80211_HAS_RC \
-            -e CONFIG_MAC80211_RC_MINSTREL \
-            -e CONFIG_MAC80211_RC_MINSTREL_HT \
-            -e CONFIG_MAC80211_LEDS \
-            -e CONFIG_LEDS_TRIGGERS \
-            -e CONFIG_ATH_COMMON \
-            -e CONFIG_ATH9K_HW \
-            -e CONFIG_ATH9K_COMMON \
-            -e CONFIG_ATH9K_BTCOEX_SUPPORT \
-            -e CONFIG_ATH9K_HTC \
-            -e CONFIG_ATH9K_HTC_DEBUGFS \
-            -e CONFIG_USB \
-            -e CONFIG_USB_SUPPORT \
-            -e CONFIG_USB_GADGET \
-            -e CONFIG_USB_CONFIGFS \
-            -e CONFIG_USB_CONFIGFS_F_HID \
-            -e CONFIG_USB_CONFIGFS_F_RNDIS \
-            -e CONFIG_USB_CONFIGFS_F_MASS_STORAGE \
-            -e CONFIG_USB_ETH \
-            -e CONFIG_USB_FUNCTIONFS \
-            -e CONFIG_PACKET \
-            -e CONFIG_RFKILL
-
-          # Build ath9k_htc as a loadable module
-          ./scripts/config --file out/.config --module CONFIG_ATH9K_HTC || true
+          echo "=== Starting build with $(nproc --all) jobs ==="
+          echo "Linker: ${{ inputs.linker }}"
+          echo "LOCALVERSION: ${{ inputs.localversion }}"
 
           make O=out ARCH=arm64 \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            olddefconfig
+            -j$(nproc --all) \
+            2>&1 | tee build.log
 
-          # FIX: olddefconfig re-validates the whole config and can silently
-          # reset options set above if it thinks a dependency isn't satisfied
-          # yet - no error, it just disappears. That's what ate ATH9K_HTC
-          # last time and produced a zip with zero WiFi modules. Reassert it
-          # here, AFTER olddefconfig, so it's the last word on the config.
-          ./scripts/config --file out/.config --module CONFIG_ATH9K_HTC
-          ./scripts/config --file out/.config -e CONFIG_ATH9K_COMMON -e CONFIG_ATH9K_HW -e CONFIG_ATH_COMMON
-
-          echo "=== Final ATH9K_HTC config state (must show =m) ==="
-          grep -E "CONFIG_ATH9K_HTC=|CONFIG_ATH9K_COMMON=|CONFIG_ATH9K_HW=|CONFIG_ATH_COMMON=" out/.config
-          if ! grep -q "^CONFIG_ATH9K_HTC=m" out/.config; then
-            echo "ERROR: CONFIG_ATH9K_HTC did not stick as a module. Aborting before a silent-fail build."
-            exit 1
-          fi
-
-      - name: Compile Kernel
-        run: |
-          set -e
-          set -o pipefail
-          cd kernel
-          export PATH="$(pwd)/../clang/bin:$PATH"
-
-          # Explicit targets: Image.gz-dtb (kernel+dtb), dtbo.img (overlay),
-          # and modules (builds every =m driver, including ath9k_htc.ko).
-          # Without "modules" here, anything set to =m in .config is silently
-          # never compiled - the config being right means nothing on its own.
-          # LD=ld.lld is required because Proton Clang does not ship GNU ld
-          make -j"$(nproc --all)" O=out \
-            ARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
-            KCFLAGS="-Wno-error" \
-            Image.gz-dtb dtbo.img modules \
-            2>&1 | tee ../build.log
-
+          # Verify output exists
           echo "=== Build outputs ==="
           ls -la out/arch/arm64/boot/
 
-      - name: Verify Kernel Outputs
+      # ─────────────────────────────────────────────
+      # 9. Package into AnyKernel3 flashable zip
+      # ─────────────────────────────────────────────
+      - name: Package AnyKernel3
         run: |
-          set -e
-          cd kernel
+          cd $HOME/AnyKernel3
 
-          if [ ! -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "ERROR: Kernel image (Image.gz-dtb) was not built."
-            echo "Dumping last 30 fatal lines from build.log:"
-            grep -n -E "make\[*]: \*\*\*|error:|Error [0-9]+|NameError|SyntaxError|fatal error:" ../build.log | tail -30
+          # Clean old artifacts
+          rm -f Image* zImage* dtbo.img *.ko
+          rm -rf modules/
+
+          # Copy kernel image (phoenix uses Image.gz-dtb)
+          if [ -f $KERNEL_PATH/out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp $KERNEL_PATH/out/arch/arm64/boot/Image.gz-dtb .
+            echo "Using Image.gz-dtb"
+          elif [ -f $KERNEL_PATH/out/arch/arm64/boot/Image.gz ]; then
+            cp $KERNEL_PATH/out/arch/arm64/boot/Image.gz .
+            echo "Using Image.gz"
+          elif [ -f $KERNEL_PATH/out/arch/arm64/boot/Image ]; then
+            cp $KERNEL_PATH/out/arch/arm64/boot/Image .
+            echo "Using Image"
+          else
+            echo "ERROR: No kernel image found!"
             exit 1
           fi
 
-          if [ ! -f out/arch/arm64/boot/dtbo.img ]; then
-            echo "ERROR: dtbo.img was not built."
-            echo "Dumping last 30 fatal lines from build.log:"
-            grep -n -E "make\[*]: \*\*\*|error:|Error [0-9]+|NameError|SyntaxError|fatal error:" ../build.log | tail -30
-            exit 1
+          # Copy dtbo.img if generated (phoenix sometimes needs this)
+          if [ -f $KERNEL_PATH/out/arch/arm64/boot/dtbo.img ]; then
+            cp $KERNEL_PATH/out/arch/arm64/boot/dtbo.img .
+            echo "Using dtbo.img"
+          elif [ -f $KERNEL_PATH/out/arch/arm64/boot/dts/qcom/dtbo.img ]; then
+            cp $KERNEL_PATH/out/arch/arm64/boot/dts/qcom/dtbo.img .
+            echo "Using dtbo.img from dts/qcom"
           fi
 
-          echo "Kernel image and dtbo.img built successfully."
+          # Collect all built modules
+          mkdir -p modules
+          find $KERNEL_PATH/out -name "*.ko" -exec cp {} modules/ \;
+          echo "Collected $(ls modules/*.ko 2>/dev/null | wc -l) modules"
 
-      - name: Collect Modules
-        run: |
-          set -e
-          cd kernel
-          mkdir -p ../mods
+          # Strip modules to reduce size
+          for mod in modules/*.ko; do
+            llvm-strip --strip-unneeded "$mod" 2>/dev/null || \
+            aarch64-linux-android-strip --strip-unneeded "$mod" 2>/dev/null || true
+          done
 
-          make O=out ARCH=arm64 INSTALL_MOD_PATH="$(pwd)/../mods_install" modules_install || true
+          # Generate anykernel.sh
+          cat > anykernel.sh << 'EOF'
+          ### AnyKernel setup
+          # properties
+          properties() { '
+          kernel.string=NetHunter Kernel for Poco X2 (MIUI 12.5.6 / Android 11)
+          do.devicecheck=1
+          do.modules=1
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=phoenix
+          device.name2=phoenixin
+          supported.versions=11
+          supported.patchlevels=
+          '; }
 
-          find out ../mods_install -name 'ath9k_htc.ko' -exec cp -v {} ../mods/ \; 2>/dev/null || true
-          find out ../mods_install -name 'ath*.ko' -exec cp -v {} ../mods/ \; 2>/dev/null || true
+          # shell variables
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
 
-          echo "=== Modules actually collected ==="
-          ls -la ../mods/*.ko 2>/dev/null || echo "(none)"
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+          . tools/ak3-core.sh;
 
-          if [ -z "$(ls -A ../mods/*.ko 2>/dev/null)" ]; then
-            echo "ERROR: No .ko modules were collected - the zip would ship with no WiFi driver."
-            echo "Dumping every .ko produced anywhere in the build tree for diagnosis:"
-            find out ../mods_install -name '*.ko' 2>/dev/null | head -50
-            exit 1
-          fi
+          # boot install
+          dump_boot;
 
-          ls -la ../mods || true
+          write_boot;
+          ## end boot install
+          EOF
 
-      - name: Package with AnyKernel3
-        run: |
-          set -e
+          # Build zip
+          ZIP_NAME="NetHunter-PocoX2-A11${{ inputs.localversion }}-$(date +%Y%m%d-%H%M).zip"
+          zip -r9 "$ZIP_NAME" * -x .git README.md *placeholder
 
-          cp kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
-          cp kernel/out/arch/arm64/boot/dtbo.img AnyKernel3/
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          echo "ZIP_PATH=$HOME/AnyKernel3/$ZIP_NAME" >> $GITHUB_ENV
 
-          mkdir -p AnyKernel3/modules/system/lib/modules
-          cp mods/*.ko AnyKernel3/modules/system/lib/modules/ 2>/dev/null || true
-
-          cd AnyKernel3
-          # FIX: sed patterns below never matched the real file (wrong case/text),
-          # so the previous zip shipped with Galaxy Nexus template values.
-          # do.devicecheck=1 + device.name1=maguro etc. means the installer
-          # refuses to flash on phoenix. Disable the check entirely.
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/' anykernel.sh
-
-          # FIX: verified by reading tools/ak3-core.sh directly - module
-          # installation (copying ath9k_htc.ko etc. onto the device) is
-          # gated entirely on do.modules=1. Template default is 0, which
-          # means the .ko files ride along in the zip but never get
-          # installed. This is the actual point of this whole build, so
-          # flip it on.
-          sed -i 's/do.modules=0/do.modules=1/' anykernel.sh
-
-          # BLOCK= still pointed at the OMAP (Galaxy Nexus) template path.
-          # Replace with phoenix's actual boot partition path.
-          sed -i 's|^BLOCK=.*;|BLOCK=/dev/block/bootdevice/by-name/boot;|' anykernel.sh
-
-          # CRITICAL FIX: the boot install section below the properties block
-          # still had example ramdisk-patching code for the Galaxy Nexus
-          # ("tuna") - touching init.tuna.rc and fstab.tuna, files that don't
-          # exist on phoenix. This never got adapted for the real device and
-          # caused a bootloop. Strip it out entirely; phoenix's kernel swap
-          # needs nothing beyond dump_boot / write_boot.
-          sed -i '/^# init\.rc$/,/^write_boot;/{ /^write_boot;/!d }' anykernel.sh
-
-          if grep -q "init.tuna.rc\|fstab.tuna" anykernel.sh; then
-            echo "ERROR: leftover tuna ramdisk-patch lines still present after strip"
-            exit 1
-          fi
-
-          echo "=== boot install section after strip ==="
-          sed -n '/# boot install/,/## end boot install/p' anykernel.sh
-
-          # phoenix is not an A/B slot device, so IS_SLOT_DEVICE=0 (already
-          # the template default) is correct as-is - no change needed there.
-
-          # Verify both patches actually landed before zipping
-          if ! grep -q '^do.devicecheck=0' anykernel.sh; then
-            echo "ERROR: devicecheck patch failed to apply"
-            exit 1
-          fi
-          if ! grep -q '^do.modules=1' anykernel.sh; then
-            echo "ERROR: do.modules patch failed to apply - modules would be dead weight in the zip"
-            exit 1
-          fi
-          if ! grep -q '^BLOCK=/dev/block/bootdevice/by-name/boot;' anykernel.sh; then
-            echo "ERROR: BLOCK path patch failed to apply"
-            exit 1
-          fi
-          echo "anykernel.sh patched correctly:"
-          grep -E "do.devicecheck|do.modules|^BLOCK=|IS_SLOT_DEVICE" anykernel.sh
-
-          rm -rf .git
-          zip -r9 ../NetHunter-Kernel-Phoenix-PE12.zip *
-
-      - name: Upload Flashable Zip
-        if: success()
+      # ─────────────────────────────────────────────
+      # 10. Upload artifacts
+      # ─────────────────────────────────────────────
+      - name: Upload kernel zip
         uses: actions/upload-artifact@v4
         with:
-          name: NetHunter-Kernel-Phoenix-PE12
-          path: NetHunter-Kernel-Phoenix-PE12.zip
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
 
-      - name: Debug Summary
+      - name: Upload build log
         if: always()
-        run: |
-          {
-            echo "=== BOOT IMAGE FILES ==="
-            ls -la kernel/out/arch/arm64/boot/ 2>&1 || echo "(kernel/out/arch/arm64/boot/ missing)"
-            echo ""
-            echo "=== ATH9K CONFIG STATE ==="
-            grep -E "CONFIG_ATH9K_HTC=|CONFIG_ATH9K_COMMON=|CONFIG_ATH9K_HW=|CONFIG_ATH_COMMON=" kernel/out/.config 2>&1 || echo "(.config missing)"
-            echo ""
-            echo "=== MODULES COLLECTED ==="
-            ls -la mods/*.ko 2>&1 || echo "(no mods collected)"
-            echo ""
-            echo "=== ANY .ko ANYWHERE IN BUILD TREE ==="
-            find kernel/out -name '*.ko' 2>&1 | head -30 || echo "(none found)"
-            echo ""
-            echo "=== FINAL ZIP CONTENTS ==="
-            unzip -l NetHunter-Kernel-Phoenix-PE12.zip 2>&1 || echo "(zip was never created)"
-            echo ""
-            echo "=== anykernel.sh KEY LINES ==="
-            grep -E "do.devicecheck|do.modules|^BLOCK=|IS_SLOT_DEVICE" AnyKernel3/anykernel.sh 2>&1 || echo "(anykernel.sh missing)"
-          } > debug-summary.log 2>&1
-          cat debug-summary.log
-
-      - name: Upload Build Log on Failure
-        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: |
-            build.log
-            debug-summary.log
+          name: build-log-${{ github.run_id }}
+          path: ${{ env.KERNEL_PATH }}/build.log
           if-no-files-found: warn
