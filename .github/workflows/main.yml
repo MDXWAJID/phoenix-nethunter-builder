@@ -128,12 +128,32 @@ jobs:
         run: |
           cd $KERNEL_PATH
 
-          # Kernel 4.14 build scripts invoke `python`.
-          # Ubuntu 22.04 provides Python 3, so `python-is-python3`
-          # makes the expected interpreter available without modifying
-          # kernel source files.
+          # Kernel 4.14 source uses a legacy GCC wrapper written for Python 2.
+          # Ubuntu 22.04 runs Python 3, and the wrapper crashes with:
+          #   TypeError: unsupported operand type(s) for >> ...
+          # The wrapper only enforces warning policy; it is not required for
+          # producing the kernel. Bypass it and use REAL_CC directly.
           python --version
           python3 --version
+
+          echo "=== Patching legacy gcc-wrapper out of Kbuild ==="
+          if grep -Eq '^CC[[:space:]]*=[[:space:]]*\$\(PYTHON\)[[:space:]]+\$\(srctree\)/scripts/gcc-wrapper\.py[[:space:]]+\$\(REAL_CC\)[[:space:]]*$' Makefile; then
+            sed -i 's|^CC[[:space:]]*=.*gcc-wrapper\.py.*$|CC = $(REAL_CC)|' Makefile
+            echo "✓ Legacy gcc-wrapper disabled; Kbuild will invoke REAL_CC directly"
+          elif grep -Eq '^CC[[:space:]]*=[[:space:]]*\$\(REAL_CC\)[[:space:]]*$' Makefile; then
+            echo "✓ gcc-wrapper already disabled"
+          else
+            echo "✗ Unexpected CC definition in kernel Makefile"
+            grep -nE '^(REAL_CC|CC)[[:space:]]*=' Makefile || true
+            exit 1
+          fi
+
+          grep -nE '^(REAL_CC|CC)[[:space:]]*=' Makefile
+
+          # Verify expected source files exist before applying targeted fixes.
+          for f in             Makefile             scripts/gcc-wrapper.py             drivers/md/dm-bow.c             drivers/mmc/core/sdio_cis.c             drivers/input/touchscreen/nt36672c/nt36xxx_mp_ctrlram.c             drivers/block/zram/zram_drv.c; do
+            [ -f "$f" ] || { echo "✗ Required source file missing: $f"; exit 1; }
+          done
 
           # Fix SECTOR_SIZE redefinition in dm-bow.c
           sed -i '/^#define SECTOR_SIZE 512$/d' drivers/md/dm-bow.c
@@ -247,8 +267,8 @@ jobs:
           export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
 
           if [ "${{ inputs.build_type }}" == "clean" ]; then
-            make O=out clean
-            make O=out mrproper
+            rm -rf out
+            mkdir -p out
           fi
 
           make O=out ARCH=arm64 ${{ inputs.defconfig }}
@@ -446,6 +466,15 @@ jobs:
           echo "Cross compiler: $(which aarch64-linux-android-gcc)"
           aarch64-linux-android-gcc --version | head -n 1
 
+          echo "=== Verify Kbuild compiler configuration ==="
+          grep -nE '^(REAL_CC|CC)[[:space:]]*=' Makefile
+          grep -qE '^CC[[:space:]]*=[[:space:]]*\$\(REAL_CC\)[[:space:]]*$' Makefile || {
+            echo "✗ Legacy gcc-wrapper is still active"
+            exit 1
+          }
+
+          echo "=== Starting kernel build ==="
+          set +e
           make O=out ARCH=arm64 \
             PYTHON=$PYTHON \
             CROSS_COMPILE=$CROSS_COMPILE \
@@ -453,6 +482,17 @@ jobs:
             HOSTCFLAGS="-Wno-deprecated-declarations" \
             -j$(nproc --all) \
             2>&1 | tee build.log
+          build_status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$build_status" -ne 0 ]; then
+            echo "✗ Kernel build failed with exit code $build_status"
+            echo "=== Last 100 lines of build.log ==="
+            tail -n 100 build.log || true
+            exit "$build_status"
+          fi
+
+          echo "✓ Kernel build completed successfully"
 
           echo "=== Build outputs ==="
           ls -la out/arch/arm64/boot/ || echo "No boot output directory!"
@@ -544,6 +584,16 @@ jobs:
           name: ${{ env.ZIP_NAME }}
           path: ${{ env.ZIP_PATH }}
           if-no-files-found: error
+
+      - name: Verify build log
+        if: always()
+        run: |
+          if [ -n "${KERNEL_PATH:-}" ] && [ -f "$KERNEL_PATH/build.log" ]; then
+            echo "✓ Build log exists"
+            echo "Build log size: $(wc -c < "$KERNEL_PATH/build.log") bytes"
+          else
+            echo "⚠ Build log was not created"
+          fi
 
       - name: Upload build log
         if: always()
