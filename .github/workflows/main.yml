@@ -451,10 +451,22 @@ jobs:
             scripts/config --file out/.config --disable CC_WERROR
           fi
 
+          # FORTIFY_SOURCE's compile-time buffer-size checks (__bad_copy_to /
+          # __bad_copy_from) are stricter under modern GCC/glibc headers than
+          # this 2019 vendor driver tree was written against. Legit old
+          # copy_to_user()/copy_from_user() call sites (e.g. drivers/platform/
+          # msm/ipa/ipa_v3/ipa_hw_stats.c) get a hard compiler error that
+          # -Wno-error cannot suppress, since it's an attribute-error, not a
+          # warning. Disable the check at the Kconfig level instead.
+          if grep -q '^CONFIG_FORTIFY_SOURCE=' out/.config; then
+            scripts/config --file out/.config --disable FORTIFY_SOURCE
+          fi
+
           make O=out ARCH=arm64 olddefconfig
 
           echo "=== Warning policy ==="
           grep -E '^CONFIG_CC_WERROR=' out/.config || echo "CONFIG_CC_WERROR is disabled/absent"
+          grep -E '^CONFIG_FORTIFY_SOURCE=' out/.config || echo "CONFIG_FORTIFY_SOURCE is disabled/absent"
 
           echo "=== Config Verification ==="
           for opt in CONFIG_MODULES CONFIG_USB_GADGET CONFIG_MAC80211 CONFIG_ATH9K_HTC CONFIG_CFG80211; do
@@ -468,12 +480,16 @@ jobs:
 
       # ─────────────────────────────────────────────
       # 9. Build the kernel
-      #    FIX: removed "-Wno-error=frame-larger-than" from KCFLAGS.
-      #    -Wframe-larger-than takes a numeric argument (=N); GCC 10
-      #    rejects "-Wno-error=frame-larger-than" without one and aborts
-      #    the entire build at scripts/mod/empty.o before any kernel
-      #    source is even compiled. The remaining two flags below take
-      #    no argument, so they're valid as-is.
+      #    FIX HISTORY:
+      #    - removed "-Wno-error=frame-larger-than" (invalid without =N,
+      #      GCC 10 aborted the whole build at scripts/mod/empty.o)
+      #    - added "-Wno-error=maybe-uninitialized": GCC 10 false-positives
+      #      on techpack/audio/asoc/codecs/tfa98xx/src/tfa98xx.o via
+      #      include/linux/ktime.h; GCC 4.9 (the original toolchain) never
+      #      flagged this.
+      #    - CONFIG_FORTIFY_SOURCE is disabled in the Configure step above,
+      #      not here — its failure is a hard attribute-error, not a
+      #      -W warning, so KCFLAGS can't suppress it.
       # ─────────────────────────────────────────────
       - name: Build kernel
         run: |
@@ -508,7 +524,7 @@ jobs:
             PYTHON=$PYTHON \
             CROSS_COMPILE=$CROSS_COMPILE \
             CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-            KCFLAGS="-Wno-error=strict-prototypes -Wno-error=format" \
+            KCFLAGS="-Wno-error=strict-prototypes -Wno-error=format -Wno-error=maybe-uninitialized" \
             HOSTCFLAGS="-Wno-deprecated-declarations" \
             -j$(nproc --all) \
             2>&1 | tee build.log
