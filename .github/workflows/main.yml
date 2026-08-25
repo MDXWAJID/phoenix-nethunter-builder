@@ -151,7 +151,13 @@ jobs:
           grep -nE '^(REAL_CC|CC)[[:space:]]*=' Makefile
 
           # Verify expected source files exist before applying targeted fixes.
-          for f in             Makefile             scripts/gcc-wrapper.py             drivers/md/dm-bow.c             drivers/mmc/core/sdio_cis.c             drivers/input/touchscreen/nt36672c/nt36xxx_mp_ctrlram.c             drivers/block/zram/zram_drv.c; do
+          for f in \
+            Makefile \
+            scripts/gcc-wrapper.py \
+            drivers/md/dm-bow.c \
+            drivers/mmc/core/sdio_cis.c \
+            drivers/input/touchscreen/nt36672c/nt36xxx_mp_ctrlram.c \
+            drivers/block/zram/zram_drv.c; do
             [ -f "$f" ] || { echo "✗ Required source file missing: $f"; exit 1; }
           done
 
@@ -257,14 +263,14 @@ jobs:
             || { echo "✗ ARM32 GCC 10 verification failed"; exit 1; }
 
       # ─────────────────────────────────────────────
-      # 8. Clone AnyKernel3
+      # 7. Clone AnyKernel3
       # ─────────────────────────────────────────────
       - name: Setup AnyKernel3
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git $HOME/AnyKernel3
 
       # ─────────────────────────────────────────────
-      # 9. Configure kernel with NetHunter options
+      # 8. Configure kernel with NetHunter options
       # ─────────────────────────────────────────────
       - name: Configure kernel
         run: |
@@ -461,7 +467,13 @@ jobs:
           done
 
       # ─────────────────────────────────────────────
-      # 10. Build the kernel
+      # 9. Build the kernel
+      #    FIX: removed "-Wno-error=frame-larger-than" from KCFLAGS.
+      #    -Wframe-larger-than takes a numeric argument (=N); GCC 10
+      #    rejects "-Wno-error=frame-larger-than" without one and aborts
+      #    the entire build at scripts/mod/empty.o before any kernel
+      #    source is even compiled. The remaining two flags below take
+      #    no argument, so they're valid as-is.
       # ─────────────────────────────────────────────
       - name: Build kernel
         run: |
@@ -496,7 +508,7 @@ jobs:
             PYTHON=$PYTHON \
             CROSS_COMPILE=$CROSS_COMPILE \
             CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-            KCFLAGS="-Wno-error=strict-prototypes -Wno-error=format -Wno-error=frame-larger-than" \
+            KCFLAGS="-Wno-error=strict-prototypes -Wno-error=format" \
             HOSTCFLAGS="-Wno-deprecated-declarations" \
             -j$(nproc --all) \
             2>&1 | tee build.log
@@ -516,7 +528,7 @@ jobs:
           ls -la out/arch/arm64/boot/ || echo "No boot output directory!"
 
       # ─────────────────────────────────────────────
-      # 11. Package into AnyKernel3 flashable zip
+      # 10. Package into AnyKernel3 flashable zip
       # ─────────────────────────────────────────────
       - name: Package AnyKernel3
         if: success()
@@ -593,7 +605,7 @@ jobs:
           echo "ZIP_PATH=$HOME/AnyKernel3/$ZIP_NAME" >> $GITHUB_ENV
 
       # ─────────────────────────────────────────────
-      # 12. Upload artifacts
+      # 11. Upload artifacts
       # ─────────────────────────────────────────────
       - name: Upload kernel zip
         if: success()
