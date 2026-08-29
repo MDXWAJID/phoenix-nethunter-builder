@@ -561,45 +561,56 @@ jobs:
       # ─────────────────────────────────────────────
       - name: Package AnyKernel3
         if: success()
+        shell: bash
         run: |
           # ─── CRITICAL FIX: Re-export the toolchain PATH ───
-          export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
+          export PATH="$TOOLCHAIN_PATH/gcc10/bin:$PATH"
           
-          cd $HOME/AnyKernel3
+          cd "$HOME/AnyKernel3"
+          
+          # Clean up any previous artifacts
           rm -f Image* zImage* dtbo.img *.ko
           rm -rf modules/
 
-          if [ -f $KERNEL_PATH/out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp $KERNEL_PATH/out/arch/arm64/boot/Image.gz-dtb .
-            echo "Using Image.gz-dtb"
-          elif [ -f $KERNEL_PATH/out/arch/arm64/boot/Image.gz ]; then
-            cp $KERNEL_PATH/out/arch/arm64/boot/Image.gz .
-            echo "Using Image.gz"
-          elif [ -f $KERNEL_PATH/out/arch/arm64/boot/Image ]; then
-            cp $KERNEL_PATH/out/arch/arm64/boot/Image .
-            echo "Using Image"
+          # Copy Kernel Image
+          if [ -f "$KERNEL_PATH/out/arch/arm64/boot/Image.gz-dtb" ]; then
+            cp "$KERNEL_PATH/out/arch/arm64/boot/Image.gz-dtb" .
+            echo "✓ Using Image.gz-dtb"
+          elif [ -f "$KERNEL_PATH/out/arch/arm64/boot/Image.gz" ]; then
+            cp "$KERNEL_PATH/out/arch/arm64/boot/Image.gz" .
+            echo "✓ Using Image.gz"
+          elif [ -f "$KERNEL_PATH/out/arch/arm64/boot/Image" ]; then
+            cp "$KERNEL_PATH/out/arch/arm64/boot/Image" .
+            echo "✓ Using Image"
           else
-            echo "✗ No kernel image found"
+            echo "✗ ERROR: No kernel image found in out/arch/arm64/boot/"
             exit 1
           fi
 
-          if [ -f $KERNEL_PATH/out/arch/arm64/boot/dtbo.img ]; then
-            cp $KERNEL_PATH/out/arch/arm64/boot/dtbo.img .
-          elif [ -f $KERNEL_PATH/out/arch/arm64/boot/dts/qcom/dtbo.img ]; then
-            cp $KERNEL_PATH/out/arch/arm64/boot/dts/qcom/dtbo.img .
+          # Copy DTBO Image (Optional but recommended)
+          if [ -f "$KERNEL_PATH/out/arch/arm64/boot/dtbo.img" ]; then
+            cp "$KERNEL_PATH/out/arch/arm64/boot/dtbo.img" .
+            echo "✓ Copied dtbo.img"
+          elif [ -f "$KERNEL_PATH/out/arch/arm64/boot/dts/qcom/dtbo.img" ]; then
+            cp "$KERNEL_PATH/out/arch/arm64/boot/dts/qcom/dtbo.img" .
+            echo "✓ Copied dtbo.img from dts/qcom"
+          else
+            echo "⚠ Warning: No dtbo.img found. Skipping."
           fi
 
           # Collect and strip kernel modules
           mkdir -p modules/system/lib/modules
           find "$KERNEL_PATH/out" -name "*.ko" -exec cp {} modules/system/lib/modules/ \;
           module_count=$(find modules/system/lib/modules -maxdepth 1 -name '*.ko' -type f | wc -l)
-          echo "Collected $module_count modules"
+          echo "✓ Collected $module_count modules"
 
           if [ "$module_count" -gt 0 ]; then
-            find modules/system/lib/modules -maxdepth 1 -name '*.ko' -type f -print0 |
-              xargs -0 -r aarch64-linux-android-strip --strip-unneeded
+            echo "Stripping modules..."
+            find modules/system/lib/modules -maxdepth 1 -name '*.ko' -type f -print0 | xargs -0 -r aarch64-linux-android-strip --strip-unneeded
+            echo "✓ Modules stripped successfully"
           fi
 
+          # Generate AnyKernel3 scripting file
           cat > anykernel.sh << 'AKEOF'
 ### AnyKernel setup
 properties() { '
@@ -631,19 +642,30 @@ fi
 write_boot;
 AKEOF
 
+          # ─── SAFE ZIPPING FIX ───
+          # Create the ZIP in the parent directory ($HOME) FIRST to prevent
+          # the "zip warning: file is being zipped into itself" corruption bug.
           ZIP_NAME="NetHunter-PocoX2-A11${{ inputs.localversion }}-$(date +%Y%m%d-%H%M).zip"
-          zip -r9 "$ZIP_NAME" . -x .git README.md '*placeholder' "$ZIP_NAME"
+          TEMP_ZIP_PATH="$HOME/$ZIP_NAME"
+          
+          echo "Creating flashable ZIP: $ZIP_NAME"
+          zip -r9 "$TEMP_ZIP_PATH" . -x "*.git/*" "*README.md*" "*placeholder*" "*.zip"
+          
+          # Move the completed, safe zip into the AnyKernel3 directory
+          mv "$TEMP_ZIP_PATH" "$HOME/AnyKernel3/$ZIP_NAME"
+          FINAL_ZIP_PATH="$HOME/AnyKernel3/$ZIP_NAME"
 
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          echo "ZIP_PATH=$HOME/AnyKernel3/$ZIP_NAME" >> $GITHUB_ENV
+          # Export to GitHub Environment for the upload step
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "ZIP_PATH=$FINAL_ZIP_PATH" >> "$GITHUB_ENV"
 
-          echo "✓ Packaged: $ZIP_NAME"
-          ls -lh "$ZIP_NAME"
+          echo "✓ Successfully packaged: $ZIP_NAME"
+          ls -lh "$FINAL_ZIP_PATH"
 
       # ─────────────────────────────────────────────
       # 11. Upload artifacts
       # ─────────────────────────────────────────────
-      - name: Upload kernel zip
+          - name: Upload kernel zip
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -651,14 +673,15 @@ AKEOF
           path: ${{ env.ZIP_PATH }}
           if-no-files-found: error
 
-      - name: Verify build log
+         - name: Verify build log
         if: always()
+        shell: bash
         run: |
           if [ -n "${KERNEL_PATH:-}" ] && [ -f "$KERNEL_PATH/build.log" ]; then
             echo "✓ Build log exists"
             echo "Build log size: $(wc -c < "$KERNEL_PATH/build.log") bytes"
           else
-            echo "⚠ Build log was not created"
+            echo "⚠ Build log was not created or KERNEL_PATH is missing"
           fi
 
       - name: Upload build log
@@ -666,5 +689,5 @@ AKEOF
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ github.run_id }}
-          path: ${{ env.KERNEL_PATH }}/build.log
+          path: ${{ env.KERNEL_PATH || 'kernel' }}/build.log
           if-no-files-found: warn
