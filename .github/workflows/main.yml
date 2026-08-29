@@ -180,8 +180,9 @@ jobs:
           # dt_entry_buf must be bytes not str for Python 3
           sed -i 's|dt_entry_buf = ""|dt_entry_buf = b""|' scripts/dtc/libfdt/mkdtboimg.py
 
-          # array('c',...) typecode removed in Python 3 — replace with bytearray
-          sed -i "s|self.__metadata = array('c', ' ' \* self.__metadata_size)|self.__metadata = bytearray(self.__metadata_size)|" scripts/dtc/libfdt/mkdtboimg.py
+          # FIXED: array('c',...) typecode removed in Python 3 — replace with bytearray
+          # Using single quotes and escaping properly so sed receives the literal [*] or \* 
+          sed -i 's|self.__metadata = array('\''c'\'', '\'' '\'' [*] self.__metadata_size)|self.__metadata = bytearray(self.__metadata_size)|g' scripts/dtc/libfdt/mkdtboimg.py
 
           grep -q 'cmd_mkdtimg = python3 ' scripts/Makefile.lib      && echo "✓ dtbo.img: python3"
           grep -q 'for idx in range(total_images):'    scripts/dtc/libfdt/mkdtboimg.py && echo "✓ xrange → range"
@@ -287,9 +288,6 @@ jobs:
           make O=out ARCH=arm64 ${{ inputs.defconfig }}
 
           # ── NetHunter configuration fragment ──
-          # IMPORTANT: written via printf to avoid YAML heredoc indentation
-          # adding leading spaces to every config line (which silently breaks
-          # merge_config.sh — it greps for ^CONFIG_, not "  CONFIG_").
           printf '%s\n' \
             '# NetHunter Config Fragment' \
             '# === Core Module Support ===' \
@@ -614,7 +612,8 @@ write_boot;
 AKEOF
 
           ZIP_NAME="NetHunter-PocoX2-A11${{ inputs.localversion }}-$(date +%Y%m%d-%H%M).zip"
-          zip -r9 "$ZIP_NAME" * -x .git README.md '*placeholder'
+          # Excluding the target zip name ensures it doesn't accidentally zip itself if created early
+          zip -r9 "$ZIP_NAME" . -x .git README.md '*placeholder' "$ZIP_NAME"
 
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "ZIP_PATH=$HOME/AnyKernel3/$ZIP_NAME" >> $GITHUB_ENV
