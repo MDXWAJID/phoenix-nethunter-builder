@@ -474,7 +474,7 @@ jobs:
           if grep -q '^CONFIG_CC_WERROR=' out/.config; then
             scripts/config --file out/.config --disable CC_WERROR
           fi
-          
+
           # Belt and suspenders
           sed -i '/^CONFIG_CC_WERROR=/d' out/.config
           echo '# CONFIG_CC_WERROR is not set' >> out/.config
@@ -646,3 +646,39 @@ jobs:
 
           echo "✓ Packaged: $ZIP_NAME"
           ls -lh "$ZIP_NAME"
+
+      # ─────────────────────────────────────────────
+      # 11. Upload the flashable kernel zip
+      #     THIS STEP WAS MISSING — the zip was built on
+      #     the runner but never uploaded, so it vanished
+      #     the moment the job finished.
+      # ─────────────────────────────────────────────
+      - name: Upload kernel zip
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+
+      # ─────────────────────────────────────────────
+      # 12. Upload the build log (always, even on failure)
+      # ─────────────────────────────────────────────
+      - name: Verify build log
+        if: always()
+        run: |
+          if [ -n "${KERNEL_PATH:-}" ] && [ -f "$KERNEL_PATH/build.log" ]; then
+            echo "✓ Build log exists"
+            echo "Build log size: $(wc -c < "$KERNEL_PATH/build.log") bytes"
+          else
+            echo "⚠ Build log was not created"
+          fi
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_id }}
+          path: ${{ env.KERNEL_PATH }}/build.log
+          if-no-files-found: warn
+          
