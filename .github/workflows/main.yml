@@ -593,6 +593,11 @@ jobs:
       - name: Package AnyKernel3
         if: success()
         run: |
+          # ─── CRITICAL FIX: Re-export the toolchain PATH ───
+          # GitHub Actions drops environment variables between steps.
+          # Without this, 'aarch64-linux-android-strip' will not be found.
+          export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
+          
           cd $HOME/AnyKernel3
           rm -f Image* zImage* dtbo.img *.ko
           rm -rf modules/
@@ -607,7 +612,7 @@ jobs:
             cp $KERNEL_PATH/out/arch/arm64/boot/Image .
             echo "Using Image"
           else
-            echo "ERROR: No kernel image found!"
+            echo "✗ No kernel image found"
             exit 1
           fi
 
@@ -617,53 +622,57 @@ jobs:
             cp $KERNEL_PATH/out/arch/arm64/boot/dts/qcom/dtbo.img .
           fi
 
-          mkdir -p modules
-          find "$KERNEL_PATH/out" -name "*.ko" -exec cp {} modules/ \;
-          module_count=$(find modules -maxdepth 1 -name '*.ko' -type f | wc -l)
+          # Collect and strip kernel modules
+          mkdir -p modules/system/lib/modules
+          find "$KERNEL_PATH/out" -name "*.ko" -exec cp {} modules/system/lib/modules/ \;
+          module_count=$(find modules/system/lib/modules -maxdepth 1 -name '*.ko' -type f | wc -l)
           echo "Collected $module_count modules"
 
           if [ "$module_count" -gt 0 ]; then
-            find modules -maxdepth 1 -name '*.ko' -type f -print0 |
+            find modules/system/lib/modules -maxdepth 1 -name '*.ko' -type f -print0 |
               xargs -0 -r aarch64-linux-android-strip --strip-unneeded
           fi
 
-          cat > anykernel.sh << 'EOF'
-          ### AnyKernel setup
-          properties() { '
-          kernel.string=NetHunter Kernel for Poco X2 (MIUI 12.5.6 / Android 11)
-          do.devicecheck=1
-          do.modules=1
-          do.systemless=0
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=phoenix
-          device.name2=phoenixin
-          supported.versions=11
-          supported.patchlevels=
-          '; }
+          cat > anykernel.sh << 'AKEOF'
+### AnyKernel setup
+properties() { '
+kernel.string=NetHunter Kernel for Poco X2 (MIUI 12.5.6 / Android 11)
+do.devicecheck=1
+do.modules=1
+do.systemless=0
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=phoenix
+device.name2=phoenixin
+supported.versions=11
+supported.patchlevels=
+'; }
 
-          block=/dev/block/bootdevice/by-name/boot;
-          is_slot_device=auto;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
+block=/dev/block/bootdevice/by-name/boot;
+is_slot_device=auto;
+ramdisk_compression=auto;
+patch_vbmeta_flag=auto;
 
-          . tools/ak3-core.sh;
+. tools/ak3-core.sh;
 
-          dump_boot;
+dump_boot;
 
-          if [ -f dtbo.img ]; then
-            flash_dtbo;
-          fi
+if [ -f dtbo.img ]; then
+  flash_dtbo;
+fi
 
-          write_boot;
-          EOF
+write_boot;
+AKEOF
 
           ZIP_NAME="NetHunter-PocoX2-A11${{ inputs.localversion }}-$(date +%Y%m%d-%H%M).zip"
-          zip -r9 "$ZIP_NAME" * -x .git README.md *placeholder
+          # Excluding the target zip name ensures it doesn't accidentally zip itself if created early
+          zip -r9 "$ZIP_NAME" . -x .git README.md '*placeholder' "$ZIP_NAME"
 
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "ZIP_PATH=$HOME/AnyKernel3/$ZIP_NAME" >> $GITHUB_ENV
 
+          echo "✓ Packaged: $ZIP_NAME"
+          ls -lh "$ZIP_NAME"
       # ─────────────────────────────────────────────
       # 11. Upload artifacts
       # ─────────────────────────────────────────────
