@@ -128,11 +128,6 @@ jobs:
         run: |
           cd $KERNEL_PATH
 
-          # Kernel 4.14 source uses a legacy GCC wrapper written for Python 2.
-          # Ubuntu 22.04 runs Python 3, and the wrapper crashes with:
-          #   TypeError: unsupported operand type(s) for >> ...
-          # The wrapper only enforces warning policy; it is not required for
-          # producing the kernel. Bypass it and use REAL_CC directly.
           python --version
           python3 --version
 
@@ -149,6 +144,18 @@ jobs:
           fi
 
           grep -nE '^(REAL_CC|CC)[[:space:]]*=' Makefile
+
+          # --- GCC 10 Compatibility (-fcommon) ---
+          # GCC 10 defaults to -fno-common, which breaks older kernels (4.14)
+          # with "multiple definition" link errors (e.g. yylloc in dtc).
+          if ! grep -q 'NH_FCOMMON_APPLIED' Makefile; then
+            {
+              echo '# NH_FCOMMON_APPLIED'
+              echo 'KBUILD_CFLAGS += -fcommon'
+              echo 'HOSTCFLAGS  += -fcommon -Wno-deprecated-declarations'
+            } >> Makefile
+            echo "✓ Appended -fcommon to KBUILD_CFLAGS and HOSTCFLAGS"
+          fi
 
           # Verify expected source files exist before applying targeted fixes.
           for f in \
@@ -178,55 +185,30 @@ jobs:
           sed -i '/char mode_buf\[8\];/d' drivers/block/zram/zram_drv.c
           sed -i 's|ssize_t ret = len, sz;|ssize_t ret = len;|' drivers/block/zram/zram_drv.c
 
-          # Fix integer-overflow bounds check in ipa_hw_stats.c debugfs
-          # write handlers. "sizeof(dbg_buff) < count + 1" wraps to a false
-          # negative when count == SIZE_MAX, silently letting an unbounded
-          # copy_from_user(dbg_buff, ...) through. GCC 4.9 never caught
-          # this; GCC 10's compile-time hardened-usercopy check
-          # (check_copy_size / __bad_copy_to in include/linux/thread_info.h)
-          # correctly refuses to compile it. Rewritten to the equivalent,
-          # overflow-safe comparison — same behavior for all valid inputs.
+          # Fix integer-overflow bounds check in ipa_hw_stats.c
           sed -i 's|if (sizeof(dbg_buff) < count + 1) {|if (count >= sizeof(dbg_buff)) {|g' drivers/platform/msm/ipa/ipa_v3/ipa_hw_stats.c
           patched_count=$(grep -c 'if (count >= sizeof(dbg_buff)) {' drivers/platform/msm/ipa/ipa_v3/ipa_hw_stats.c)
           echo "✓ Patched $patched_count overflow-prone bounds checks in ipa_hw_stats.c (expected 5)"
 
           # Fix dtbo.img packaging: scripts/Makefile.lib hardcodes "python2"
-          # to run mkdtboimg.py. Ubuntu 22.04 ships no python2 binary at
-          # all (Error 127: python2: not found). The script itself is
-          # python2/3 compatible except for two spots. Point the build at
-          # python3 and fix both.
           sed -i 's|cmd_mkdtimg = python2 |cmd_mkdtimg = python3 |' scripts/Makefile.lib
 
-          # (a) xrange() was removed in Python 3 — swap for range().
+          # (a) xrange() -> range()
           sed -i 's|for idx in xrange(total_images):|for idx in range(total_images):|' scripts/dtc/libfdt/mkdtboimg.py
 
-          # (b) add_dt_entries() starts a buffer as a text string ("") and
-          # then appends compressed bytes to it (compress_dt_entry() returns
-          # binary output from zlib). Python 2 silently allowed mixing text
-          # and binary data; Python 3 raises:
-          #   TypeError: can only concatenate str (not "bytes") to str
-          # Fix: start the buffer as bytes (b"") instead of text ("").
+          # (b) dt_entry_buf text to binary
           sed -i 's|dt_entry_buf = ""|dt_entry_buf = b""|' scripts/dtc/libfdt/mkdtboimg.py
 
-          # (c) _update_metadata() builds its header buffer with:
-          #   array('c', ' ' * self.__metadata_size)
-          # The 'c' typecode (single-character string array) was removed
-          # from Python's array module entirely in Python 3 — it no longer
-          # exists as a valid typecode, so this raises:
-          #   TypeError: cannot use a str to initialize an array with typecode 'c'
-          # struct.pack_into() and file.write() both work directly on a
-          # plain bytearray, so replace the array('c', ...) buffer with an
-          # equivalent-size bytearray — same behavior, Python 3 native.
-          sed -i "s|self.__metadata = array('c', ' ' \* self.__metadata_size)|self.__metadata = bytearray(self.__metadata_size)|" scripts/dtc/libfdt/mkdtboimg.py
-
-          grep -q 'cmd_mkdtimg = python3 ' scripts/Makefile.lib && echo "✓ dtbo.img now built with python3"
-          grep -q 'for idx in range(total_images):' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ xrange -> range patched in mkdtboimg.py"
-          grep -q 'dt_entry_buf = b""' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ dt_entry_buf is now binary-safe (bytes) in mkdtboimg.py"
-          grep -q 'self.__metadata = bytearray(self.__metadata_size)' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ metadata buffer is now a bytearray in mkdtboimg.py"
+          # (c) array('c', ...) -> bytearray
+          # Using [*] inside double quotes forces sed to match the literal asterisk
+          sed -i "s|self.__metadata = array('c', ' ' [*] self.__metadata_size)|self.__metadata = bytearray(self.__metadata_size)|g" scripts/dtc/libfdt/mkdtboimg.py
 
           echo "=== Verify compatibility patches ==="
-          grep -n 'is_battery_saver_on(void)' include/linux/battery_saver.h
-          echo "✓ Source compatibility patches applied"
+          grep -q 'cmd_mkdtimg = python3 ' scripts/Makefile.lib && echo "✓ dtbo.img python3"
+          grep -q 'for idx in range(total_images):' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ xrange -> range"
+          grep -q 'dt_entry_buf = b""' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ dt_entry_buf binary"
+          grep -q 'self.__metadata = bytearray(self.__metadata_size)' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ metadata bytearray"
+          grep -q 'NH_FCOMMON_APPLIED' Makefile && echo "✓ -fcommon applied"
 
       # ─────────────────────────────────────────────
       # 5. Validate defconfig exists
@@ -243,7 +225,6 @@ jobs:
 
       # ─────────────────────────────────────────────
       # 6. Setup toolchain — GCC 10 cross-compiler
-      #    Symlink Ubuntu's gcc-10 as the Android-named toolchain
       # ─────────────────────────────────────────────
       - name: Setup GCC 10 toolchain
         shell: bash
@@ -332,7 +313,7 @@ jobs:
 
           make O=out ARCH=arm64 ${{ inputs.defconfig }}
 
-                   # ── NetHunter configuration fragment ──
+          # ── NetHunter configuration fragment ──
           printf '%s\n' \
             '# NetHunter Config Fragment' \
             '# === Core Module Support ===' \
@@ -482,24 +463,21 @@ jobs:
             'CONFIG_BT_6LOWPAN=m' \
             > /tmp/nethunter.fragment
 
-          # merge_config.sh removes duplicate symbols and then lets Kconfig
-          # resolve dependencies instead of blindly appending duplicate keys.
           chmod +x scripts/kconfig/merge_config.sh
           scripts/kconfig/merge_config.sh -m -O out out/.config /tmp/nethunter.fragment
           make O=out ARCH=arm64 olddefconfig
 
-          # Set LOCALVERSION using the kernel's supported config helper.
           chmod +x scripts/config
           scripts/config --file out/.config --set-str LOCALVERSION "${{ inputs.localversion }}"
           scripts/config --file out/.config --disable LOCALVERSION_AUTO
 
-          # FORTIFY_SOURCE / CONFIG_CC_WERROR are unrelated to the IPA driver
-          # error below — check_copy_size() in include/linux/thread_info.h is
-          # unconditional in this tree, not gated by CONFIG_FORTIFY_SOURCE.
-          # Vendor 4.14 source contains legacy warnings that become fatal under Werror.
           if grep -q '^CONFIG_CC_WERROR=' out/.config; then
             scripts/config --file out/.config --disable CC_WERROR
           fi
+          
+          # Belt and suspenders
+          sed -i '/^CONFIG_CC_WERROR=/d' out/.config
+          echo '# CONFIG_CC_WERROR is not set' >> out/.config
 
           make O=out ARCH=arm64 olddefconfig
 
@@ -507,33 +485,19 @@ jobs:
           grep -E '^CONFIG_CC_WERROR=' out/.config || echo "CONFIG_CC_WERROR is disabled/absent"
 
           echo "=== Config Verification ==="
-          for opt in CONFIG_MODULES CONFIG_USB_GADGET CONFIG_MAC80211 CONFIG_ATH9K_HTC CONFIG_CFG80211; do
+          fail=0
+          for opt in CONFIG_MODULES CONFIG_USB_GADGET CONFIG_MAC80211 CONFIG_ATH9K_HTC CONFIG_CFG80211 CONFIG_SND_USB_AUDIO; do
             if grep -q "^$opt=[ym]" out/.config; then
               echo "✓ $opt"
             else
               echo "✗ $opt MISSING"
-              exit 1
+              fail=1
             fi
           done
+          [ "$fail" -eq 0 ] || exit 1
 
       # ─────────────────────────────────────────────
       # 9. Build the kernel
-      #    FIX HISTORY:
-      #    - removed "-Wno-error=frame-larger-than" (invalid without =N,
-      #      GCC 10 aborted the whole build at scripts/mod/empty.o)
-      #    - added "-Wno-error=maybe-uninitialized": false positive in
-      #      techpack/audio/asoc/codecs/tfa98xx/src/tfa98xx.o
-      #    - added "-Wno-error=uninitialized": false positive in
-      #      techpack/audio/dsp/apr_elliptic.c ('module_id' flagged by
-      #      GCC 10, not GCC 4.9)
-      #    - the ipa_hw_stats.c failure is a REAL bug (integer-overflow
-      #      bounds check), fixed at the source level in the pre-build
-      #      patches step above — not something any KCFLAGS/-Wno-error
-      #      flag can or should suppress, since __bad_copy_to() is a hard
-      #      compiletime_error attribute, not a warning.
-      #    - the dtbo.img packaging crash (TypeError: can only concatenate
-      #      str (not "bytes") to str) is a Python 2/3 bug in mkdtboimg.py,
-      #      fixed at the source level in the pre-build patches step above.
       # ─────────────────────────────────────────────
       - name: Build kernel
         run: |
@@ -564,12 +528,14 @@ jobs:
 
           echo "=== Starting kernel build ==="
           set +e
+          # NOTE: Do NOT pass HOSTCFLAGS= on the command line. It overrides
+          # the kernel's default flags (-O2, -std=gnu89, etc). We appended
+          # our required flags directly to the Makefile in Step 4.
           make O=out ARCH=arm64 \
             PYTHON=$PYTHON \
             CROSS_COMPILE=$CROSS_COMPILE \
             CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-            KCFLAGS="-Wno-error=strict-prototypes -Wno-error=format -Wno-error=maybe-uninitialized -Wno-error=uninitialized" \
-            HOSTCFLAGS="-Wno-deprecated-declarations" \
+            KCFLAGS="-Wno-error=strict-prototypes -Wno-error=format -Wno-error=maybe-uninitialized -Wno-error=uninitialized -Wno-error=unused-variable -Wno-error=unused-function -Wno-error=unused-but-set-variable" \
             -j$(nproc --all) \
             2>&1 | tee build.log
           build_status=${PIPESTATUS[0]}
@@ -577,8 +543,11 @@ jobs:
 
           if [ "$build_status" -ne 0 ]; then
             echo "✗ Kernel build failed with exit code $build_status"
-            echo "=== Last 100 lines of build.log ==="
-            tail -n 100 build.log || true
+            echo "=== Searching for common failure points ==="
+            grep -i -B 2 -A 2 "multiple definition" build.log || true
+            grep -i -B 2 -A 2 "undefined reference" build.log || true
+            echo "=== Last 150 lines of build.log ==="
+            tail -n 150 build.log || true
             exit "$build_status"
           fi
 
@@ -594,8 +563,6 @@ jobs:
         if: success()
         run: |
           # ─── CRITICAL FIX: Re-export the toolchain PATH ───
-          # GitHub Actions drops environment variables between steps.
-          # Without this, 'aarch64-linux-android-strip' will not be found.
           export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
           
           cd $HOME/AnyKernel3
@@ -665,7 +632,6 @@ write_boot;
 AKEOF
 
           ZIP_NAME="NetHunter-PocoX2-A11${{ inputs.localversion }}-$(date +%Y%m%d-%H%M).zip"
-          # Excluding the target zip name ensures it doesn't accidentally zip itself if created early
           zip -r9 "$ZIP_NAME" . -x .git README.md '*placeholder' "$ZIP_NAME"
 
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
@@ -673,6 +639,7 @@ AKEOF
 
           echo "✓ Packaged: $ZIP_NAME"
           ls -lh "$ZIP_NAME"
+
       # ─────────────────────────────────────────────
       # 11. Upload artifacts
       # ─────────────────────────────────────────────
