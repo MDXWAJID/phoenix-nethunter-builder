@@ -208,9 +208,21 @@ jobs:
           # Fix: start the buffer as bytes (b"") instead of text ("").
           sed -i 's|dt_entry_buf = ""|dt_entry_buf = b""|' scripts/dtc/libfdt/mkdtboimg.py
 
+          # (c) _update_metadata() builds its header buffer with:
+          #   array('c', ' ' * self.__metadata_size)
+          # The 'c' typecode (single-character string array) was removed
+          # from Python's array module entirely in Python 3 — it no longer
+          # exists as a valid typecode, so this raises:
+          #   TypeError: cannot use a str to initialize an array with typecode 'c'
+          # struct.pack_into() and file.write() both work directly on a
+          # plain bytearray, so replace the array('c', ...) buffer with an
+          # equivalent-size bytearray — same behavior, Python 3 native.
+          sed -i "s|self.__metadata = array('c', ' ' \* self.__metadata_size)|self.__metadata = bytearray(self.__metadata_size)|" scripts/dtc/libfdt/mkdtboimg.py
+
           grep -q 'cmd_mkdtimg = python3 ' scripts/Makefile.lib && echo "✓ dtbo.img now built with python3"
           grep -q 'for idx in range(total_images):' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ xrange -> range patched in mkdtboimg.py"
           grep -q 'dt_entry_buf = b""' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ dt_entry_buf is now binary-safe (bytes) in mkdtboimg.py"
+          grep -q 'self.__metadata = bytearray(self.__metadata_size)' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ metadata buffer is now a bytearray in mkdtboimg.py"
 
           echo "=== Verify compatibility patches ==="
           grep -n 'is_battery_saver_on(void)' include/linux/battery_saver.h
