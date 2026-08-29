@@ -193,12 +193,24 @@ jobs:
           # Fix dtbo.img packaging: scripts/Makefile.lib hardcodes "python2"
           # to run mkdtboimg.py. Ubuntu 22.04 ships no python2 binary at
           # all (Error 127: python2: not found). The script itself is
-          # python2/3 compatible except for one xrange() call. Point the
-          # build at python3 and swap that one call for range().
+          # python2/3 compatible except for two spots. Point the build at
+          # python3 and fix both.
           sed -i 's|cmd_mkdtimg = python2 |cmd_mkdtimg = python3 |' scripts/Makefile.lib
+
+          # (a) xrange() was removed in Python 3 — swap for range().
           sed -i 's|for idx in xrange(total_images):|for idx in range(total_images):|' scripts/dtc/libfdt/mkdtboimg.py
+
+          # (b) add_dt_entries() starts a buffer as a text string ("") and
+          # then appends compressed bytes to it (compress_dt_entry() returns
+          # binary output from zlib). Python 2 silently allowed mixing text
+          # and binary data; Python 3 raises:
+          #   TypeError: can only concatenate str (not "bytes") to str
+          # Fix: start the buffer as bytes (b"") instead of text ("").
+          sed -i 's|dt_entry_buf = ""|dt_entry_buf = b""|' scripts/dtc/libfdt/mkdtboimg.py
+
           grep -q 'cmd_mkdtimg = python3 ' scripts/Makefile.lib && echo "✓ dtbo.img now built with python3"
           grep -q 'for idx in range(total_images):' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ xrange -> range patched in mkdtboimg.py"
+          grep -q 'dt_entry_buf = b""' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ dt_entry_buf is now binary-safe (bytes) in mkdtboimg.py"
 
           echo "=== Verify compatibility patches ==="
           grep -n 'is_battery_saver_on(void)' include/linux/battery_saver.h
@@ -506,6 +518,9 @@ jobs:
       #      patches step above — not something any KCFLAGS/-Wno-error
       #      flag can or should suppress, since __bad_copy_to() is a hard
       #      compiletime_error attribute, not a warning.
+      #    - the dtbo.img packaging crash (TypeError: can only concatenate
+      #      str (not "bytes") to str) is a Python 2/3 bug in mkdtboimg.py,
+      #      fixed at the source level in the pre-build patches step above.
       # ─────────────────────────────────────────────
       - name: Build kernel
         run: |
