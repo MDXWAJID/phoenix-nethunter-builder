@@ -190,6 +190,16 @@ jobs:
           patched_count=$(grep -c 'if (count >= sizeof(dbg_buff)) {' drivers/platform/msm/ipa/ipa_v3/ipa_hw_stats.c)
           echo "✓ Patched $patched_count overflow-prone bounds checks in ipa_hw_stats.c (expected 5)"
 
+          # Fix dtbo.img packaging: scripts/Makefile.lib hardcodes "python2"
+          # to run mkdtboimg.py. Ubuntu 22.04 ships no python2 binary at
+          # all (Error 127: python2: not found). The script itself is
+          # python2/3 compatible except for one xrange() call. Point the
+          # build at python3 and swap that one call for range().
+          sed -i 's|cmd_mkdtimg = python2 |cmd_mkdtimg = python3 |' scripts/Makefile.lib
+          sed -i 's|for idx in xrange(total_images):|for idx in range(total_images):|' scripts/dtc/libfdt/mkdtboimg.py
+          grep -q 'cmd_mkdtimg = python3 ' scripts/Makefile.lib && echo "✓ dtbo.img now built with python3"
+          grep -q 'for idx in range(total_images):' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ xrange -> range patched in mkdtboimg.py"
+
           echo "=== Verify compatibility patches ==="
           grep -n 'is_battery_saver_on(void)' include/linux/battery_saver.h
           echo "✓ Source compatibility patches applied"
