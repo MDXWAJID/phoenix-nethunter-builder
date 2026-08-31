@@ -382,6 +382,7 @@ jobs:
             'CONFIG_RTL8187=m' \
             'CONFIG_RTL8192CU=m' \
             'CONFIG_RTL8XXXU=m' \
+            'CONFIG_RTL8188EU=m' \
             '# === USB WiFi — Ralink/Mediatek ===' \
             'CONFIG_RT2X00=m' \
             'CONFIG_RT2X00_LIB=m' \
@@ -391,9 +392,20 @@ jobs:
             'CONFIG_RT2800_LIB_MMIO=m' \
             'CONFIG_RT2800_LIB_USB=m' \
             'CONFIG_RT2800USB=m' \
+            'CONFIG_RT2800USB_RT33XX=y' \
+            'CONFIG_RT2800USB_RT35XX=y' \
+            'CONFIG_RT2800USB_RT3573=y' \
+            'CONFIG_RT2800USB_RT53XX=y' \
+            'CONFIG_RT2800USB_RT55XX=y' \
+            'CONFIG_RT2800USB_UNKNOWN=y' \
             'CONFIG_RT73USB=m' \
             'CONFIG_RT2500USB=m' \
             'CONFIG_CARL9170=m' \
+            'CONFIG_CARL9170_LEDS=y' \
+            'CONFIG_CARL9170_WPC=y' \
+            'CONFIG_CARL9170_HWRNG=y' \
+            'CONFIG_MT7601U=m' \
+            'CONFIG_ZD1211RW=m' \
             '# === USB Gadget / HID ===' \
             'CONFIG_USB_HIDDEV=y' \
             'CONFIG_USB_GADGET=y' \
@@ -461,6 +473,7 @@ jobs:
             'CONFIG_BT_BNEP=m' \
             'CONFIG_BT_HIDP=m' \
             'CONFIG_BT_6LOWPAN=m' \
+            'CONFIG_BT_ATH3K=m' \
             > /tmp/nethunter.fragment
 
           chmod +x scripts/kconfig/merge_config.sh
@@ -601,16 +614,17 @@ jobs:
             echo "✓ Modules stripped successfully"
           fi
 
-          # ─── FIX: build anykernel.sh with printf, NOT a heredoc ───
-          # A heredoc with column-0 content breaks the YAML block scalar
-          # (the red squiggly lines). printf keeps every line indented.
+          # ─── FIX: build anykernel.sh with UPPERCASE variables ───
+          # Modern AnyKernel3 requires BLOCK, IS_SLOT_DEVICE, etc. in UPPERCASE.
+          # do.systemless=1 creates a Magisk module for dynamic partitions on Android 11.
+          # write_boot handles dtbo.img automatically via flash_generic dtbo.
           printf '%s\n' \
             '### AnyKernel setup' \
             "properties() { '" \
             'kernel.string=NetHunter Kernel for Poco X2 (MIUI 12.5.6 / Android 11)' \
             'do.devicecheck=1' \
             'do.modules=1' \
-            'do.systemless=0' \
+            'do.systemless=1' \
             'do.cleanup=1' \
             'do.cleanuponabort=0' \
             'device.name1=phoenix' \
@@ -619,28 +633,25 @@ jobs:
             'supported.patchlevels=' \
             "'; }" \
             '' \
-            'block=/dev/block/bootdevice/by-name/boot;' \
-            'is_slot_device=auto;' \
-            'ramdisk_compression=auto;' \
-            'patch_vbmeta_flag=auto;' \
+            'BLOCK=boot;' \
+            'IS_SLOT_DEVICE=0;' \
+            'RAMDISK_COMPRESSION=auto;' \
+            'PATCH_VBMETA_FLAG=auto;' \
             '' \
             '. tools/ak3-core.sh;' \
             '' \
             'dump_boot;' \
-            '' \
-            'if [ -f dtbo.img ]; then' \
-            '  flash_dtbo;' \
-            'fi' \
-            '' \
             'write_boot;' \
             > anykernel.sh
 
           echo "✓ anykernel.sh generated:"
-          head -n 5 anykernel.sh
+          cat anykernel.sh
 
-          ZIP_NAME="NetHunter-PocoX2-A11${{ inputs.localversion }}-$(date +%Y%m%d-%H%M).zip"
+          ZIP_BASE="NetHunter-PocoX2-A11${{ inputs.localversion }}-$(date +%Y%m%d-%H%M)"
+          ZIP_NAME="${ZIP_BASE}.zip"
           zip -r9 "$ZIP_NAME" . -x "*.git/*" "*README.md*" "*placeholder*" "*.zip"
 
+          echo "ZIP_BASE=$ZIP_BASE" >> $GITHUB_ENV
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "ZIP_PATH=$HOME/AnyKernel3/$ZIP_NAME" >> $GITHUB_ENV
 
@@ -649,15 +660,12 @@ jobs:
 
       # ─────────────────────────────────────────────
       # 11. Upload the flashable kernel zip
-      #     THIS STEP WAS MISSING — the zip was built on
-      #     the runner but never uploaded, so it vanished
-      #     the moment the job finished.
       # ─────────────────────────────────────────────
       - name: Upload kernel zip
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_NAME }}
+          name: ${{ env.ZIP_BASE }}
           path: ${{ env.ZIP_PATH }}
           if-no-files-found: error
 
@@ -681,4 +689,3 @@ jobs:
           name: build-log-${{ github.run_id }}
           path: ${{ env.KERNEL_PATH }}/build.log
           if-no-files-found: warn
-          
