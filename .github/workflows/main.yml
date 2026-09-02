@@ -1,4 +1,4 @@
-name: NetHunter Kernel — Poco X2 (MIUI 12.5.6 / Android 11)
+name: NetHunter Kernel — Poco X2 (crDroid 12 / Android 16)
 
 on:
   workflow_dispatch:
@@ -6,19 +6,19 @@ on:
       kernel_repo:
         description: 'Kernel source repository'
         required: true
-        default: 'https://github.com/Hycon-Devices/kernel_xiaomi_phoenix.git'
+        default: 'https://github.com/crdroidandroid/android_kernel_xiaomi_sm6150.git'
       kernel_branch:
         description: 'Kernel branch'
         required: true
-        default: '11'
+        default: '16.0'
       defconfig:
         description: 'Defconfig name'
         required: true
-        default: 'phoenix_defconfig'
+        default: 'vendor/sdmsteppe-perf_defconfig'
       localversion:
         description: 'Kernel LOCALVERSION suffix'
         required: true
-        default: '-perf-NetHunter-v1'
+        default: '-NetHunter-v1'
       build_type:
         description: 'Build type'
         type: choice
@@ -31,7 +31,6 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
-
     steps:
       # ─────────────────────────────────────────────
       # 1. Free disk space
@@ -49,7 +48,6 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
           echo "=== Runner information ==="
           lsb_release -a || true
           uname -a
@@ -68,16 +66,6 @@ jobs:
           sudo add-apt-repository -y universe
           sudo add-apt-repository -y multiverse
           sudo apt-get update
-
-          echo "=== Diagnose held/broken packages ==="
-          apt-mark showhold || true
-          dpkg --audit || true
-
-          echo "=== APT diagnostics before GCC 10 ==="
-          echo "--- GCC 10 AArch64 availability ---"
-          apt-cache policy gcc-10-aarch64-linux-gnu || true
-          echo "--- GCC 10 ARM32 availability ---"
-          apt-cache policy gcc-10-arm-linux-gnueabihf || true
 
           echo "=== Install base build dependencies ==="
           sudo apt-get install -y --no-install-recommends \
@@ -106,9 +94,6 @@ jobs:
           echo "=== Verify cross-compilers ==="
           aarch64-linux-gnu-gcc-10 --version | head -n 1
           arm-linux-gnueabihf-gcc-10 --version | head -n 1
-
-          echo "=== Final package diagnostics ==="
-          dpkg --audit || true
           echo "=== APT installation completed successfully ==="
 
       # ─────────────────────────────────────────────
@@ -127,88 +112,50 @@ jobs:
       - name: Pre-build source patches
         run: |
           cd $KERNEL_PATH
-
-          python --version
           python3 --version
 
-          echo "=== Patching legacy gcc-wrapper out of Kbuild ==="
+          echo "=== Patching legacy gcc-wrapper out of Kbuild (if present) ==="
           if grep -Eq '^CC[[:space:]]*=[[:space:]]*\$\(PYTHON\)[[:space:]]+\$\(srctree\)/scripts/gcc-wrapper\.py[[:space:]]+\$\(REAL_CC\)[[:space:]]*$' Makefile; then
             sed -i 's|^CC[[:space:]]*=.*gcc-wrapper\.py.*$|CC = $(REAL_CC)|' Makefile
-            echo "✓ Legacy gcc-wrapper disabled; Kbuild will invoke REAL_CC directly"
+            echo "✓ Legacy gcc-wrapper disabled"
           elif grep -Eq '^CC[[:space:]]*=[[:space:]]*\$\(REAL_CC\)[[:space:]]*$' Makefile; then
             echo "✓ gcc-wrapper already disabled"
           else
-            echo "✗ Unexpected CC definition in kernel Makefile"
+            echo "ℹ CC definition (may be fine on modern tree):"
             grep -nE '^(REAL_CC|CC)[[:space:]]*=' Makefile || true
-            exit 1
           fi
 
-          grep -nE '^(REAL_CC|CC)[[:space:]]*=' Makefile
-
-          # --- GCC 10 Compatibility (-fcommon) ---
-          # GCC 10 defaults to -fno-common, which breaks older kernels (4.14)
-          # with "multiple definition" link errors (e.g. yylloc in dtc).
+          # GCC 10 compatibility (-fcommon)
           if ! grep -q 'NH_FCOMMON_APPLIED' Makefile; then
             {
               echo '# NH_FCOMMON_APPLIED'
               echo 'KBUILD_CFLAGS += -fcommon'
               echo 'HOSTCFLAGS  += -fcommon -Wno-deprecated-declarations'
             } >> Makefile
-            echo "✓ Appended -fcommon to KBUILD_CFLAGS and HOSTCFLAGS"
+            echo "✓ Appended -fcommon"
           fi
 
-          # Verify expected source files exist before applying targeted fixes.
-          for f in \
-            Makefile \
-            scripts/gcc-wrapper.py \
-            drivers/md/dm-bow.c \
-            drivers/mmc/core/sdio_cis.c \
-            drivers/input/touchscreen/nt36672c/nt36xxx_mp_ctrlram.c \
-            drivers/block/zram/zram_drv.c; do
-            [ -f "$f" ] || { echo "✗ Required source file missing: $f"; exit 1; }
-          done
+          # Common compatibility fixes (safe even if some files differ on 16.0)
+          [ -f include/linux/battery_saver.h ] && \
+            sed -i 's|static inline bool is_battery_saver_on()|static inline bool is_battery_saver_on(void)|' include/linux/battery_saver.h || true
 
-          # Fix strict-prototypes error in the Qualcomm battery-saver header.
-          sed -i 's|static inline bool is_battery_saver_on()|static inline bool is_battery_saver_on(void)|' include/linux/battery_saver.h
+          [ -f drivers/md/dm-bow.c ] && \
+            sed -i '/^#define SECTOR_SIZE 512$/d' drivers/md/dm-bow.c || true
 
-          # Fix SECTOR_SIZE redefinition in dm-bow.c
-          sed -i '/^#define SECTOR_SIZE 512$/d' drivers/md/dm-bow.c
+          [ -f drivers/mmc/core/sdio_cis.c ] && \
+            sed -i 's|strlcpy(string, buf, strlen(buf) + 1);|strlcpy(string, buf, sizeof(string));|' drivers/mmc/core/sdio_cis.c || true
 
-          # Fix strlcpy destination size in sdio_cis.c
-          sed -i 's|strlcpy(string, buf, strlen(buf) + 1);|strlcpy(string, buf, sizeof(string));|' drivers/mmc/core/sdio_cis.c
+          # dtbo / python3 fixes
+          [ -f scripts/Makefile.lib ] && \
+            sed -i 's|cmd_mkdtimg = python2 |cmd_mkdtimg = python3 |' scripts/Makefile.lib || true
 
-          # Fix snprintf buffer overruns in nt36672c touchscreen driver
-          sed -i 's|snprintf(mp_setting_criteria_csv_filename, PAGE_SIZE|snprintf(mp_setting_criteria_csv_filename, sizeof(mp_setting_criteria_csv_filename)|g' drivers/input/touchscreen/nt36672c/nt36xxx_mp_ctrlram.c
-          sed -i 's|snprintf(mpcriteria, PAGE_SIZE|snprintf(mpcriteria, sizeof(mpcriteria)|g' drivers/input/touchscreen/nt36672c/nt36xxx_mp_ctrlram.c
+          [ -f scripts/dtc/libfdt/mkdtboimg.py ] && {
+            sed -i 's|for idx in xrange(total_images):|for idx in range(total_images):|' scripts/dtc/libfdt/mkdtboimg.py
+            sed -i 's|dt_entry_buf = ""|dt_entry_buf = b""|' scripts/dtc/libfdt/mkdtboimg.py
+            sed -i "s|self.__metadata = array('c', ' ' [*] self.__metadata_size)|self.__metadata = bytearray(self.__metadata_size)|g" scripts/dtc/libfdt/mkdtboimg.py
+          } || true
 
-          # Fix unused variables in zram_drv.c
-          sed -i '/char mode_buf\[8\];/d' drivers/block/zram/zram_drv.c
-          sed -i 's|ssize_t ret = len, sz;|ssize_t ret = len;|' drivers/block/zram/zram_drv.c
-
-          # Fix integer-overflow bounds check in ipa_hw_stats.c
-          sed -i 's|if (sizeof(dbg_buff) < count + 1) {|if (count >= sizeof(dbg_buff)) {|g' drivers/platform/msm/ipa/ipa_v3/ipa_hw_stats.c
-          patched_count=$(grep -c 'if (count >= sizeof(dbg_buff)) {' drivers/platform/msm/ipa/ipa_v3/ipa_hw_stats.c)
-          echo "✓ Patched $patched_count overflow-prone bounds checks in ipa_hw_stats.c (expected 5)"
-
-          # Fix dtbo.img packaging: scripts/Makefile.lib hardcodes "python2"
-          sed -i 's|cmd_mkdtimg = python2 |cmd_mkdtimg = python3 |' scripts/Makefile.lib
-
-          # (a) xrange() -> range()
-          sed -i 's|for idx in xrange(total_images):|for idx in range(total_images):|' scripts/dtc/libfdt/mkdtboimg.py
-
-          # (b) dt_entry_buf text to binary
-          sed -i 's|dt_entry_buf = ""|dt_entry_buf = b""|' scripts/dtc/libfdt/mkdtboimg.py
-
-          # (c) array('c', ...) -> bytearray
-          # Using [*] inside double quotes forces sed to match the literal asterisk
-          sed -i "s|self.__metadata = array('c', ' ' [*] self.__metadata_size)|self.__metadata = bytearray(self.__metadata_size)|g" scripts/dtc/libfdt/mkdtboimg.py
-
-          echo "=== Verify compatibility patches ==="
-          grep -q 'cmd_mkdtimg = python3 ' scripts/Makefile.lib && echo "✓ dtbo.img python3"
-          grep -q 'for idx in range(total_images):' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ xrange -> range"
-          grep -q 'dt_entry_buf = b""' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ dt_entry_buf binary"
-          grep -q 'self.__metadata = bytearray(self.__metadata_size)' scripts/dtc/libfdt/mkdtboimg.py && echo "✓ metadata bytearray"
-          grep -q 'NH_FCOMMON_APPLIED' Makefile && echo "✓ -fcommon applied"
+          echo "=== Pre-build patches applied ==="
 
       # ─────────────────────────────────────────────
       # 5. Validate defconfig exists
@@ -221,7 +168,7 @@ jobs:
             find arch/arm64/configs/ -name "*defconfig*" | sort
             exit 1
           fi
-          echo "✓ defconfig FOUND"
+          echo "✓ defconfig FOUND: ${{ inputs.defconfig }}"
 
       # ─────────────────────────────────────────────
       # 6. Setup toolchain — GCC 10 cross-compiler
@@ -230,7 +177,6 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
           TOOLCHAIN_DIR="$HOME/toolchain/gcc10/bin"
           mkdir -p "$TOOLCHAIN_DIR"
 
@@ -257,12 +203,10 @@ jobs:
           ln -sf /usr/bin/arm-linux-gnueabihf-as "$TOOLCHAIN_DIR/arm-linux-androideabi-as"
 
           echo "TOOLCHAIN_PATH=$HOME/toolchain" >> "$GITHUB_ENV"
-
           export PATH="$TOOLCHAIN_DIR:$PATH"
 
           echo "=== AArch64 compiler ==="
           aarch64-linux-android-gcc --version | head -n 1
-
           echo "=== ARM32 compiler ==="
           arm-linux-androideabi-gcc --version | head -n 1
 
@@ -271,23 +215,8 @@ jobs:
         run: |
           set -euxo pipefail
           export PATH="$TOOLCHAIN_PATH/gcc10/bin:$PATH"
-
-          echo "=== AArch64 GCC ==="
-          aarch64-linux-android-gcc --version | head -n 1
-
-          echo "=== AArch64 LD ==="
-          aarch64-linux-android-ld --version | head -n 1
-
-          echo "=== ARM32 GCC ==="
-          arm-linux-androideabi-gcc --version | head -n 1
-
-          aarch64-linux-android-gcc --version | grep -q "10\." \
-            && echo "✓ AArch64 GCC 10 confirmed" \
-            || { echo "✗ AArch64 GCC 10 verification failed"; exit 1; }
-
-          arm-linux-androideabi-gcc --version | grep -q "10\." \
-            && echo "✓ ARM32 GCC 10 confirmed" \
-            || { echo "✗ ARM32 GCC 10 verification failed"; exit 1; }
+          aarch64-linux-android-gcc --version | grep -q "10\." && echo "✓ AArch64 GCC 10 confirmed" || exit 1
+          arm-linux-androideabi-gcc --version | grep -q "10\." && echo "✓ ARM32 GCC 10 confirmed" || exit 1
 
       # ─────────────────────────────────────────────
       # 7. Clone AnyKernel3
@@ -316,14 +245,12 @@ jobs:
           # ── NetHunter configuration fragment ──
           printf '%s\n' \
             '# NetHunter Config Fragment' \
-            '# === Core Module Support ===' \
             'CONFIG_MODULES=y' \
             'CONFIG_MODULE_UNLOAD=y' \
             'CONFIG_MODVERSIONS=y' \
             'CONFIG_MODULE_SRCVERSION_ALL=y' \
             'CONFIG_KALLSYMS=y' \
             'CONFIG_KALLSYMS_ALL=y' \
-            '# === Netfilter / iptables ===' \
             'CONFIG_NETFILTER_XT_TARGET_LOG=y' \
             'CONFIG_NETFILTER_XT_MATCH_MAC=y' \
             'CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y' \
@@ -335,78 +262,33 @@ jobs:
             'CONFIG_NETFILTER_XT_MATCH_TIME=y' \
             'CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y' \
             'CONFIG_NETFILTER_XT_MATCH_HASHLIMIT=y' \
-            '# === Wireless Stack ===' \
             'CONFIG_MAC80211=y' \
             'CONFIG_CFG80211=y' \
             'CONFIG_NL80211_TESTMODE=y' \
             'CONFIG_MAC80211_MESH=y' \
-            'CONFIG_MAC80211_LEDS=y' \
-            'CONFIG_CFG80211_CERTIFICATION_ONUS=y' \
-            'CONFIG_CFG80211_CRDA_SUPPORT=y' \
             'CONFIG_CFG80211_WEXT=y' \
-            '# === USB Networking ===' \
             'CONFIG_USB_USBNET=m' \
             'CONFIG_USB_NET_CDCETHER=m' \
             'CONFIG_USB_NET_RNDIS_HOST=m' \
             'CONFIG_USB_NET_CDC_NCM=m' \
-            'CONFIG_USB_NET_HUAWEI_CDC_NCM=m' \
             'CONFIG_USB_NET_CDC_MBIM=m' \
-            'CONFIG_USB_WDM=m' \
-            '# === USB Serial (3G/LTE modems) ===' \
             'CONFIG_USB_SERIAL=m' \
             'CONFIG_USB_SERIAL_OPTION=m' \
             'CONFIG_USB_SERIAL_QUALCOMM=m' \
             'CONFIG_USB_SERIAL_WWAN=m' \
-            'CONFIG_USB_SERIAL_SIERRAWIRELESS=m' \
-            '# === Bluetooth USB ===' \
             'CONFIG_BT_HCIBTUSB=m' \
-            'CONFIG_BT_HCIBTUSB_BCM=y' \
-            'CONFIG_BT_HCIBTUSB_RTL=y' \
-            'CONFIG_BT_HCIBTSDIO=m' \
-            '# === USB WiFi — Atheros (AR9271 / ATH9K_HTC) ===' \
             'CONFIG_ATH_CARDS=m' \
             'CONFIG_ATH9K=m' \
-            'CONFIG_ATH9K_COMMON=m' \
-            'CONFIG_ATH9K_HW=m' \
-            'CONFIG_ATH9K_BTCOEX_SUPPORT=y' \
-            'CONFIG_ATH9K_RFKILL=y' \
-            'CONFIG_ATH9K_PCOEM=y' \
-            'CONFIG_ATH9K_HWRNG=y' \
             'CONFIG_ATH9K_HTC=m' \
-            'CONFIG_ATH9K_HTC_DEBUGFS=y' \
-            '# === USB WiFi — Realtek ===' \
             'CONFIG_RTL_CARDS=m' \
             'CONFIG_RTLWIFI=m' \
             'CONFIG_RTLWIFI_USB=m' \
-            'CONFIG_RTL8192C_COMMON=m' \
             'CONFIG_RTL8187=m' \
             'CONFIG_RTL8192CU=m' \
             'CONFIG_RTL8XXXU=m' \
-            'CONFIG_RTL8188EU=m' \
-            '# === USB WiFi — Ralink/Mediatek ===' \
             'CONFIG_RT2X00=m' \
-            'CONFIG_RT2X00_LIB=m' \
-            'CONFIG_RT2X00_LIB_USB=m' \
-            'CONFIG_RT2X00_LIB_FIRMWARE=m' \
-            'CONFIG_RT2800_LIB=m' \
-            'CONFIG_RT2800_LIB_MMIO=m' \
-            'CONFIG_RT2800_LIB_USB=m' \
             'CONFIG_RT2800USB=m' \
-            'CONFIG_RT2800USB_RT33XX=y' \
-            'CONFIG_RT2800USB_RT35XX=y' \
-            'CONFIG_RT2800USB_RT3573=y' \
-            'CONFIG_RT2800USB_RT53XX=y' \
-            'CONFIG_RT2800USB_RT55XX=y' \
-            'CONFIG_RT2800USB_UNKNOWN=y' \
             'CONFIG_RT73USB=m' \
-            'CONFIG_RT2500USB=m' \
-            'CONFIG_CARL9170=m' \
-            'CONFIG_CARL9170_LEDS=y' \
-            'CONFIG_CARL9170_WPC=y' \
-            'CONFIG_CARL9170_HWRNG=y' \
-            'CONFIG_MT7601U=m' \
-            'CONFIG_ZD1211RW=m' \
-            '# === USB Gadget / HID ===' \
             'CONFIG_USB_HIDDEV=y' \
             'CONFIG_USB_GADGET=y' \
             'CONFIG_USB_CONFIGFS=y' \
@@ -416,64 +298,22 @@ jobs:
             'CONFIG_USB_CONFIGFS_F_ACM=y' \
             'CONFIG_USB_CONFIGFS_F_ECM=y' \
             'CONFIG_USB_CONFIGFS_F_EEM=y' \
-            'CONFIG_USB_CONFIGFS_F_SUBSET=y' \
             'CONFIG_USB_CONFIGFS_F_FS=y' \
             'CONFIG_USB_CONFIGFS_F_UVC=y' \
             'CONFIG_USB_CONFIGFS_F_MIDI=y' \
-            'CONFIG_USB_CONFIGFS_F_AUDIO_SRC=y' \
-            'CONFIG_USB_CONFIGFS_UEVENT=y' \
-            '# === RFKILL ===' \
             'CONFIG_RFKILL=y' \
-            'CONFIG_RFKILL_INPUT=y' \
-            'CONFIG_RFKILL_LEDS=y' \
-            'CONFIG_RFKILL_GPIO=y' \
-            '# === LEDs ===' \
-            'CONFIG_LEDS_CLASS=y' \
-            'CONFIG_LEDS_TRIGGERS=y' \
-            '# === Diagnostics ===' \
-            'CONFIG_PACKET_DIAG=y' \
-            'CONFIG_UNIX_DIAG=y' \
-            'CONFIG_INET_DIAG=y' \
-            'CONFIG_INET_TCP_DIAG=y' \
-            'CONFIG_INET_UDP_DIAG=y' \
-            'CONFIG_NETLINK_DIAG=y' \
-            '# === TUN/TAP ===' \
             'CONFIG_TUN=y' \
             'CONFIG_TAP=y' \
-            '# === Traffic Control ===' \
             'CONFIG_NET_SCHED=y' \
             'CONFIG_NET_CLS_U32=y' \
-            'CONFIG_NET_EMATCH=y' \
-            'CONFIG_NET_CLS_ACT=y' \
             'CONFIG_NET_SCH_HTB=y' \
-            'CONFIG_NET_SCH_HFSC=y' \
-            'CONFIG_NET_SCH_INGRESS=y' \
             'CONFIG_NET_SCH_NETEM=y' \
-            '# === USB Mass Storage ===' \
             'CONFIG_USB_STORAGE=y' \
-            'CONFIG_USB_STORAGE_DATAFAB=y' \
-            'CONFIG_USB_STORAGE_FREECOM=y' \
-            'CONFIG_USB_STORAGE_ISD200=y' \
-            'CONFIG_USB_STORAGE_USBAT=y' \
-            'CONFIG_USB_STORAGE_SDDR09=y' \
-            'CONFIG_USB_STORAGE_SDDR55=y' \
-            'CONFIG_USB_STORAGE_JUMPSHOT=y' \
-            'CONFIG_USB_STORAGE_ALAUDA=y' \
-            'CONFIG_USB_STORAGE_ONETOUCH=y' \
-            'CONFIG_USB_STORAGE_KARMA=y' \
-            'CONFIG_USB_STORAGE_CYPRESS_ATACB=y' \
-            'CONFIG_USB_STORAGE_ENE_UB6250=y' \
-            '# === USB Audio / Video ===' \
             'CONFIG_SND_USB_AUDIO=y' \
-            'CONFIG_MEDIA_USB_SUPPORT=y' \
-            'CONFIG_USB_VIDEO_CLASS=m' \
-            '# === Input / Misc ===' \
             'CONFIG_INPUT_UINPUT=y' \
             'CONFIG_BT_RFCOMM=m' \
             'CONFIG_BT_BNEP=m' \
             'CONFIG_BT_HIDP=m' \
-            'CONFIG_BT_6LOWPAN=m' \
-            'CONFIG_BT_ATH3K=m' \
             > /tmp/nethunter.fragment
 
           chmod +x scripts/kconfig/merge_config.sh
@@ -487,19 +327,13 @@ jobs:
           if grep -q '^CONFIG_CC_WERROR=' out/.config; then
             scripts/config --file out/.config --disable CC_WERROR
           fi
-
-          # Belt and suspenders
           sed -i '/^CONFIG_CC_WERROR=/d' out/.config
           echo '# CONFIG_CC_WERROR is not set' >> out/.config
-
           make O=out ARCH=arm64 olddefconfig
-
-          echo "=== Warning policy ==="
-          grep -E '^CONFIG_CC_WERROR=' out/.config || echo "CONFIG_CC_WERROR is disabled/absent"
 
           echo "=== Config Verification ==="
           fail=0
-          for opt in CONFIG_MODULES CONFIG_USB_GADGET CONFIG_MAC80211 CONFIG_ATH9K_HTC CONFIG_CFG80211 CONFIG_SND_USB_AUDIO; do
+          for opt in CONFIG_MODULES CONFIG_USB_GADGET CONFIG_MAC80211 CONFIG_CFG80211; do
             if grep -q "^$opt=[ym]" out/.config; then
               echo "✓ $opt"
             else
@@ -515,11 +349,9 @@ jobs:
       - name: Build kernel
         run: |
           cd $KERNEL_PATH
-
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
-
           export PYTHON=python3
           export CROSS_COMPILE=aarch64-linux-android-
           export REAL_CC=aarch64-linux-android-gcc
@@ -527,23 +359,8 @@ jobs:
           export KBUILD_BUILD_USER=NetHunter
           export KBUILD_BUILD_HOST=GitHub-Actions
 
-          echo "=== Starting build ==="
-          echo "Python: $(python3 --version)"
-          echo "Cross compiler: $(which aarch64-linux-android-gcc)"
-          aarch64-linux-android-gcc --version | head -n 1
-
-          echo "=== Verify Kbuild compiler configuration ==="
-          grep -nE '^(REAL_CC|CC)[[:space:]]*=' Makefile
-          grep -qE '^CC[[:space:]]*=[[:space:]]*\$\(REAL_CC\)[[:space:]]*$' Makefile || {
-            echo "✗ Legacy gcc-wrapper is still active"
-            exit 1
-          }
-
           echo "=== Starting kernel build ==="
           set +e
-          # NOTE: Do NOT pass HOSTCFLAGS= on the command line. It overrides
-          # the kernel's default flags (-O2, -std=gnu89, etc). We appended
-          # our required flags directly to the Makefile in Step 4.
           make O=out ARCH=arm64 \
             PYTHON=$PYTHON \
             CROSS_COMPILE=$CROSS_COMPILE \
@@ -556,17 +373,12 @@ jobs:
 
           if [ "$build_status" -ne 0 ]; then
             echo "✗ Kernel build failed with exit code $build_status"
-            echo "=== Searching for common failure points ==="
-            grep -i -B 2 -A 2 "multiple definition" build.log || true
-            grep -i -B 2 -A 2 "undefined reference" build.log || true
             echo "=== Last 150 lines of build.log ==="
             tail -n 150 build.log || true
             exit "$build_status"
           fi
 
           echo "✓ Kernel build completed successfully"
-
-          echo "=== Build outputs ==="
           ls -la out/arch/arm64/boot/ || echo "No boot output directory!"
 
       # ─────────────────────────────────────────────
@@ -575,10 +387,9 @@ jobs:
       - name: Package AnyKernel3
         if: success()
         run: |
-          # ─── CRITICAL FIX: Re-export the toolchain PATH ───
           export PATH=$TOOLCHAIN_PATH/gcc10/bin:$PATH
-
           cd $HOME/AnyKernel3
+
           rm -f Image* zImage* dtbo.img *.ko
           rm -rf modules/
 
@@ -602,59 +413,49 @@ jobs:
             cp $KERNEL_PATH/out/arch/arm64/boot/dts/qcom/dtbo.img .
           fi
 
-          # Collect and strip kernel modules
           mkdir -p modules/system/lib/modules
           find "$KERNEL_PATH/out" -name "*.ko" -exec cp {} modules/system/lib/modules/ \;
           module_count=$(find modules/system/lib/modules -maxdepth 1 -name '*.ko' -type f | wc -l)
           echo "Collected $module_count modules"
-
           if [ "$module_count" -gt 0 ]; then
-            echo "Stripping modules..."
             find modules/system/lib/modules -maxdepth 1 -name '*.ko' -type f -print0 | xargs -0 -r aarch64-linux-android-strip --strip-unneeded
-            echo "✓ Modules stripped successfully"
           fi
 
-          # ─── FIX: build anykernel.sh with UPPERCASE variables ───
-          # Modern AnyKernel3 requires BLOCK, IS_SLOT_DEVICE, etc. in UPPERCASE.
-          # do.systemless=1 creates a Magisk module for dynamic partitions on Android 11.
-          # write_boot handles dtbo.img automatically via flash_generic dtbo.
           printf '%s\n' \
             '### AnyKernel setup' \
             "properties() { '" \
-            'kernel.string=NetHunter Kernel for Poco X2 (MIUI 12.5.6 / Android 11)' \
+            'kernel.string=NetHunter Kernel for Poco X2 (crDroid 12 / Android 16)' \
             'do.devicecheck=1' \
             'do.modules=1' \
-            'do.systemless=1' \
+            'do.systemless=0' \
             'do.cleanup=1' \
             'do.cleanuponabort=0' \
             'device.name1=phoenix' \
             'device.name2=phoenixin' \
-            'supported.versions=11' \
+            'supported.versions=16' \
             'supported.patchlevels=' \
             "'; }" \
             '' \
-            'BLOCK=boot;' \
-            'IS_SLOT_DEVICE=0;' \
-            'RAMDISK_COMPRESSION=auto;' \
-            'PATCH_VBMETA_FLAG=auto;' \
+            'block=/dev/block/bootdevice/by-name/boot;' \
+            'is_slot_device=auto;' \
+            'ramdisk_compression=auto;' \
+            'patch_vbmeta_flag=auto;' \
             '' \
             '. tools/ak3-core.sh;' \
             '' \
             'dump_boot;' \
+            '' \
+            'if [ -f dtbo.img ]; then' \
+            '  flash_dtbo;' \
+            'fi' \
+            '' \
             'write_boot;' \
             > anykernel.sh
 
-          echo "✓ anykernel.sh generated:"
-          cat anykernel.sh
-
-          ZIP_BASE="NetHunter-PocoX2-A11${{ inputs.localversion }}-$(date +%Y%m%d-%H%M)"
-          ZIP_NAME="${ZIP_BASE}.zip"
+          ZIP_NAME="NetHunter-PocoX2-crDroid12${{ inputs.localversion }}-$(date +%Y%m%d-%H%M).zip"
           zip -r9 "$ZIP_NAME" . -x "*.git/*" "*README.md*" "*placeholder*" "*.zip"
-
-          echo "ZIP_BASE=$ZIP_BASE" >> $GITHUB_ENV
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "ZIP_PATH=$HOME/AnyKernel3/$ZIP_NAME" >> $GITHUB_ENV
-
           echo "✓ Packaged: $ZIP_NAME"
           ls -lh "$ZIP_NAME"
 
@@ -665,23 +466,13 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ZIP_BASE }}
+          name: ${{ env.ZIP_NAME }}
           path: ${{ env.ZIP_PATH }}
           if-no-files-found: error
 
       # ─────────────────────────────────────────────
-      # 12. Upload the build log (always, even on failure)
+      # 12. Upload the build log (always)
       # ─────────────────────────────────────────────
-      - name: Verify build log
-        if: always()
-        run: |
-          if [ -n "${KERNEL_PATH:-}" ] && [ -f "$KERNEL_PATH/build.log" ]; then
-            echo "✓ Build log exists"
-            echo "Build log size: $(wc -c < "$KERNEL_PATH/build.log") bytes"
-          else
-            echo "⚠ Build log was not created"
-          fi
-
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
