@@ -323,7 +323,12 @@ jobs:
           chmod +x scripts/config
           scripts/config --file out/.config --set-str LOCALVERSION "${{ inputs.localversion }}"
           scripts/config --file out/.config --disable LOCALVERSION_AUTO
-
+          
+          chmod +x scripts/config
+          scripts/config --file out/.config --disable BPFILTER
+          scripts/config --file out/.config --disable BPFILTER_UMH
+          make O=out ARCH=arm64 olddefconfig
+            
           if grep -q '^CONFIG_CC_WERROR=' out/.config; then
             scripts/config --file out/.config --disable CC_WERROR
           fi
